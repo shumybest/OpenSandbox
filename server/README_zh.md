@@ -33,7 +33,7 @@
 - **包管理器**：[uv](https://github.com/astral-sh/uv)（推荐）或 pip
 - **运行时后端**：
   - Docker Engine 20.10+（使用 Docker 运行时）
-  - Kubernetes 1.22.4+（使用 Kubernetes 运行时）
+  - Kubernetes 1.21.1+（使用 Kubernetes 运行时）
 - **操作系统**：Linux、macOS 或带 WSL2 的 Windows
 
 ## 快速开始
