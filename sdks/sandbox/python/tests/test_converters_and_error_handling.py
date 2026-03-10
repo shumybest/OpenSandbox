@@ -20,7 +20,6 @@ from datetime import datetime, timedelta
 import pytest
 from httpx import HTTPStatusError, Request, Response
 
-from opensandbox.api.lifecycle.errors import UnexpectedStatus
 from opensandbox.adapters.converter.exception_converter import (
     ExceptionConverter,
     parse_sandbox_error,
@@ -38,6 +37,7 @@ from opensandbox.adapters.converter.response_handler import handle_api_error
 from opensandbox.adapters.converter.sandbox_model_converter import (
     SandboxModelConverter,
 )
+from opensandbox.api.lifecycle.errors import UnexpectedStatus
 from opensandbox.exceptions import (
     InvalidArgumentException,
     SandboxApiException,

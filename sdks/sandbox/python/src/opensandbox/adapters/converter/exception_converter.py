@@ -38,6 +38,7 @@ from httpx import (
     TimeoutException,
     WriteTimeout,
 )
+
 from opensandbox.api.execd.errors import UnexpectedStatus as ExecdUnexpectedStatus
 from opensandbox.api.lifecycle.errors import (
     UnexpectedStatus as LifecycleUnexpectedStatus,
