@@ -749,7 +749,7 @@ class DockerSandboxService(OSSFSMixin, SandboxService):
                 return port
         return None
 
-    def create_sandbox(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
+    async def create_sandbox(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
         """
         Create a new sandbox from a container image using Docker.
 
