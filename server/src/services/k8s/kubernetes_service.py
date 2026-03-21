@@ -276,7 +276,7 @@ class KubernetesSandboxService(SandboxService):
         self._ensure_image_auth_support(request)
         
         # Generate sandbox ID
-        sandbox_id = self.generate_sandbox_id()
+        sandbox_id = self.generate_sandbox_id(self._sandbox_name_prefix(request))
         
         # Calculate expiration time (None = no TTL, manual cleanup only; same as Docker)
         created_at = datetime.now(timezone.utc)
@@ -398,6 +398,23 @@ class KubernetesSandboxService(SandboxService):
                     "message": f"Failed to create sandbox: {str(e)}",
                 },
             ) from e
+
+    @staticmethod
+    def _sandbox_name_prefix(request: CreateSandboxRequest) -> str | None:
+        """
+        Derive a readable sandbox name prefix from request metadata.
+
+        TheViber passes a label-safe ``metadata.name`` token for OpenClaw instances.
+        Reusing it keeps BatchSandbox / Pod names human-readable while still
+        preserving uniqueness via ``generate_sandbox_id``.
+        """
+        if request is None or not request.metadata:
+            return None
+        name = request.metadata.get("name")
+        if name is None:
+            return None
+        normalized = str(name).strip()
+        return normalized or None
     
     def get_sandbox(self, sandbox_id: str) -> Sandbox:
         """

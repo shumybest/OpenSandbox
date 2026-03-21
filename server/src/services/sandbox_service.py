@@ -20,6 +20,7 @@ This module defines the abstract interface for sandbox services.
 """
 
 from abc import ABC, abstractmethod
+import re
 import socket
 from uuid import uuid4
 
@@ -45,14 +46,39 @@ class SandboxService(ABC):
     """
 
     @staticmethod
-    def generate_sandbox_id() -> str:
+    def generate_sandbox_id(prefix: str | None = None) -> str:
         """
         Generate a unique sandbox identifier.
 
         Returns:
-            str: A RFC4122-compliant UUID4 string (with hyphens)
+            str: A RFC4122-compliant UUID4 string (with hyphens), or a readable
+                DNS-label-safe prefix followed by a short random suffix.
         """
+        readable_prefix = SandboxService._sanitize_sandbox_id_prefix(prefix)
+        if readable_prefix:
+            return f"{readable_prefix}-{uuid4().hex[:8]}"
         return str(uuid4())
+
+    @staticmethod
+    def _sanitize_sandbox_id_prefix(prefix: str | None) -> str:
+        """
+        Convert a human-readable prefix into a DNS-label-safe sandbox id prefix.
+
+        The final sandbox id appends ``-<8hex>``, so the prefix itself is capped
+        at 54 characters to keep the overall resource name within Kubernetes'
+        63-character DNS label limit.
+        """
+        if prefix is None:
+            return ""
+        normalized = prefix.strip().lower()
+        if not normalized:
+            return ""
+        normalized = re.sub(r"[^a-z0-9-]+", "-", normalized)
+        normalized = re.sub(r"-{2,}", "-", normalized).strip("-")
+        if not normalized:
+            return ""
+        normalized = normalized[:54].strip("-")
+        return normalized
 
     @staticmethod
     def _resolve_bind_ip(family: int = socket.AF_INET) -> str:

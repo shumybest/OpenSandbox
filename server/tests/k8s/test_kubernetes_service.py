@@ -25,6 +25,7 @@ from src.services.k8s.kubernetes_service import KubernetesSandboxService
 from src.services.constants import (
     OPEN_SANDBOX_EGRESS_AUTH_HEADER,
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
+    SANDBOX_ID_LABEL,
     SANDBOX_MANUAL_CLEANUP_LABEL,
     SandboxErrorCodes,
 )
@@ -127,6 +128,35 @@ class TestKubernetesSandboxServiceCreate:
         assert response.id is not None
         assert response.status.state == "Running"
         k8s_service.workload_provider.create_workload.assert_called_once()
+
+    def test_create_sandbox_uses_metadata_name_as_readable_id_prefix(
+        self, k8s_service, create_sandbox_request, mock_workload
+    ):
+        create_sandbox_request.metadata["name"] = "demo-openclaw"
+        k8s_service.workload_provider.create_workload.return_value = {
+            "name": "demo-openclaw-abcd1234",
+            "uid": "abc-123",
+        }
+        k8s_service.workload_provider.get_workload.return_value = mock_workload
+        k8s_service.workload_provider.get_status.return_value = {
+            "state": "Running",
+            "reason": "",
+            "message": "Pod is running",
+            "last_transition_at": datetime.now(timezone.utc),
+        }
+
+        with patch.object(
+            k8s_service,
+            "generate_sandbox_id",
+            return_value="demo-openclaw-abcd1234",
+        ) as mock_generate_id:
+            response = k8s_service.create_sandbox(create_sandbox_request)
+
+        assert response.id == "demo-openclaw-abcd1234"
+        mock_generate_id.assert_called_once_with("demo-openclaw")
+        _, kwargs = k8s_service.workload_provider.create_workload.call_args
+        assert kwargs["sandbox_id"] == "demo-openclaw-abcd1234"
+        assert kwargs["labels"][SANDBOX_ID_LABEL] == "demo-openclaw-abcd1234"
 
     def test_create_sandbox_uses_configured_timeout_and_poll_interval(
         self, k8s_service, create_sandbox_request, mock_workload

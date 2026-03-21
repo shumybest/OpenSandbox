@@ -20,7 +20,7 @@ export DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock"
 预拉取 OpenClaw 镜像：
 
 ```shell
-docker pull ghcr.io/openclaw/openclaw:latest
+docker pull aism-cn-beijing.cr.volces.com/theviber/openclaw:latest
 ```
 
 启动 OpenSandbox Server（日志会持续输出在当前终端）：
@@ -38,7 +38,7 @@ opensandbox-server
 该示例为快速体验预置了以下参数：
 
 - OpenSandbox Server：`http://localhost:8080`
-- 镜像：`ghcr.io/openclaw/openclaw:latest`
+- 镜像：`aism-cn-beijing.cr.volces.com/theviber/openclaw:latest`
 - Gateway 端口：`18789`
 - 超时时间：`3600s`
 - Token：`OPENCLAW_GATEWAY_TOKEN`（默认：`dummy-token-for-sandbox`）
@@ -59,7 +59,7 @@ uv run python examples/openclaw/main.py
 预期输出类似：
 
 ```text
-Creating openclaw sandbox with image=ghcr.io/openclaw/openclaw:latest on OpenSandbox server http://localhost:8080...
+Creating openclaw sandbox with image=aism-cn-beijing.cr.volces.com/theviber/openclaw:latest on OpenSandbox server http://localhost:8080...
 [check] sandbox ready after 7.1s
 Openclaw started finished. Please refer to 127.0.0.1:56123
 ```

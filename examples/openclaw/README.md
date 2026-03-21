@@ -20,7 +20,7 @@ export DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock"
 Pre-pull the OpenClaw image:
 
 ```shell
-docker pull ghcr.io/openclaw/openclaw:latest
+docker pull aism-cn-beijing.cr.volces.com/theviber/openclaw:latest
 ```
 
 Start the OpenSandbox server (logs will stay in the terminal):
@@ -37,7 +37,7 @@ If you see errors like `FileNotFoundError: [Errno 2] No such file or directory` 
 
 This example is hard-coded for a quick start:
 - OpenSandbox server: `http://localhost:8080`
-- Image: `ghcr.io/openclaw/openclaw:latest`
+- Image: `aism-cn-beijing.cr.volces.com/theviber/openclaw:latest`
 - Gateway port: `18789`
 - Timeout: `3600s`
 - Token: `OPENCLAW_GATEWAY_TOKEN` (default: `dummy-token-for-sandbox`)
@@ -58,7 +58,7 @@ uv run python examples/openclaw/main.py
 You should see output similar to:
 
 ```text
-Creating openclaw sandbox with image=ghcr.io/openclaw/openclaw:latest on OpenSandbox server http://localhost:8080...
+Creating openclaw sandbox with image=aism-cn-beijing.cr.volces.com/theviber/openclaw:latest on OpenSandbox server http://localhost:8080...
 [check] sandbox ready after 7.1s
 Openclaw started finished. Please refer to 127.0.0.1:56123
 ```
