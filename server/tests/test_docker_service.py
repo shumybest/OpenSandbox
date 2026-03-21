@@ -15,7 +15,7 @@
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from docker.errors import DockerException, NotFound as DockerNotFound
 import pytest
@@ -24,12 +24,14 @@ from pydantic import ValidationError
 
 from src.config import (
     AppConfig,
+    EGRESS_MODE_DNS,
     EgressConfig,
     RuntimeConfig,
     ServerConfig,
     StorageConfig,
     IngressConfig,
 )
+from src.services.constants import EGRESS_MODE_ENV, OPENSANDBOX_EGRESS_TOKEN
 from src.services.constants import (
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
     SANDBOX_EXPIRES_AT_LABEL,
@@ -111,8 +113,9 @@ def test_env_allows_empty_string_and_skips_none():
     assert all(not item.startswith("NONE=") for item in environment)
 
 
+@pytest.mark.asyncio
 @patch("src.services.docker.docker")
-def test_create_sandbox_applies_security_defaults(mock_docker):
+async def test_create_sandbox_applies_security_defaults(mock_docker):
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
     mock_client.api.create_host_config.return_value = {
@@ -138,7 +141,7 @@ def test_create_sandbox_applies_security_defaults(mock_docker):
         patch.object(service, "_ensure_image_available"),
         patch.object(service, "_prepare_sandbox_runtime"),
     ):
-        service.create_sandbox(request)
+        await service.create_sandbox(request)
 
     host_config = mock_client.api.create_container.call_args.kwargs["host_config"]
     assert "no-new-privileges:true" in host_config.get("security_opt", [])
@@ -164,8 +167,9 @@ def test_create_sandbox_applies_security_defaults(mock_docker):
         ),
     ],
 )
+@pytest.mark.asyncio
 @patch("src.services.docker.docker")
-def test_prepare_runtime_failure_triggers_cleanup(
+async def test_prepare_runtime_failure_triggers_cleanup(
     mock_docker, runtime_exc, expected_status, expect_wrapped_error
 ):
     mock_client = MagicMock()
@@ -190,7 +194,7 @@ def test_prepare_runtime_failure_triggers_cleanup(
         patch.object(service, "_prepare_sandbox_runtime", side_effect=runtime_exc),
     ):
         with pytest.raises(HTTPException) as exc:
-            service.create_sandbox(request)
+            await service.create_sandbox(request)
 
     mock_container.remove.assert_called_with(force=True)
 
@@ -202,8 +206,9 @@ def test_prepare_runtime_failure_triggers_cleanup(
         assert exc.value.detail["message"] == runtime_exc.detail["message"]
 
 
+@pytest.mark.asyncio
 @patch("src.services.docker.docker")
-def test_create_sandbox_rejects_invalid_metadata(mock_docker):
+async def test_create_sandbox_rejects_invalid_metadata(mock_docker):
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
     mock_docker.from_env.return_value = mock_client
@@ -220,15 +225,16 @@ def test_create_sandbox_rejects_invalid_metadata(mock_docker):
     )
 
     with pytest.raises(HTTPException) as exc:
-        service.create_sandbox(request)
+        await service.create_sandbox(request)
 
     assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
     assert exc.value.detail["code"] == SandboxErrorCodes.INVALID_METADATA_LABEL
     mock_client.containers.create.assert_not_called()
 
 
+@pytest.mark.asyncio
 @patch("src.services.docker.docker")
-def test_create_sandbox_rejects_timeout_above_configured_maximum(mock_docker):
+async def test_create_sandbox_rejects_timeout_above_configured_maximum(mock_docker):
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
     mock_docker.from_env.return_value = mock_client
@@ -247,15 +253,16 @@ def test_create_sandbox_rejects_timeout_above_configured_maximum(mock_docker):
     )
 
     with pytest.raises(HTTPException) as exc:
-        service.create_sandbox(request)
+        await service.create_sandbox(request)
 
     assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
     assert exc.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
     assert "configured maximum of 3600s" in exc.value.detail["message"]
 
 
+@pytest.mark.asyncio
 @patch("src.services.docker.docker")
-def test_create_sandbox_requires_entrypoint(mock_docker):
+async def test_create_sandbox_requires_entrypoint(mock_docker):
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
     mock_docker.from_env.return_value = mock_client
@@ -273,15 +280,16 @@ def test_create_sandbox_requires_entrypoint(mock_docker):
     request.entrypoint = []
 
     with pytest.raises(HTTPException) as exc:
-        service.create_sandbox(request)
+        await service.create_sandbox(request)
 
     assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
     assert exc.value.detail["code"] == SandboxErrorCodes.INVALID_ENTRYPOINT
     mock_client.containers.create.assert_not_called()
 
 
+@pytest.mark.asyncio
 @patch("src.services.docker.docker")
-def test_network_policy_rejected_on_host_mode(mock_docker):
+async def test_network_policy_rejected_on_host_mode(mock_docker):
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
     mock_docker.from_env.return_value = mock_client
@@ -302,14 +310,15 @@ def test_network_policy_rejected_on_host_mode(mock_docker):
     )
 
     with pytest.raises(HTTPException) as exc:
-        service.create_sandbox(request)
+        await service.create_sandbox(request)
 
     assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
     assert exc.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
 
 
+@pytest.mark.asyncio
 @patch("src.services.docker.docker")
-def test_network_policy_requires_egress_image(mock_docker):
+async def test_network_policy_requires_egress_image(mock_docker):
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
     mock_docker.from_env.return_value = mock_client
@@ -330,14 +339,15 @@ def test_network_policy_requires_egress_image(mock_docker):
     )
 
     with pytest.raises(HTTPException) as exc:
-        service.create_sandbox(request)
+        await service.create_sandbox(request)
 
     assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
     assert exc.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
 
 
+@pytest.mark.asyncio
 @patch("src.services.docker.docker")
-def test_egress_sidecar_injection_and_capabilities(mock_docker):
+async def test_egress_sidecar_injection_and_capabilities(mock_docker):
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
 
@@ -373,7 +383,7 @@ def test_egress_sidecar_injection_and_capabilities(mock_docker):
         patch.object(service, "_ensure_image_available"),
         patch.object(service, "_prepare_sandbox_runtime"),
     ):
-        service.create_sandbox(req)
+        await service.create_sandbox(req)
 
     assert len(mock_client.api.create_container.call_args_list) == 2
     sidecar_call = mock_client.api.create_container.call_args_list[0]
@@ -398,7 +408,8 @@ def test_egress_sidecar_injection_and_capabilities(mock_docker):
     assert labels[SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY] == "egress-token"
 
     sidecar_env = sidecar_kwargs["environment"]
-    assert "OPENSANDBOX_EGRESS_TOKEN=egress-token" in sidecar_env
+    assert f"{OPENSANDBOX_EGRESS_TOKEN}=egress-token" in sidecar_env
+    assert f"{EGRESS_MODE_ENV}={EGRESS_MODE_DNS}" in sidecar_env
 
 
 # ---------------------------------------------------------------------------
@@ -406,8 +417,9 @@ def test_egress_sidecar_injection_and_capabilities(mock_docker):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
 @patch("src.services.docker.docker")
-def test_network_policy_rejected_on_user_defined_network(mock_docker):
+async def test_network_policy_rejected_on_user_defined_network(mock_docker):
     """networkPolicy must be rejected when network_mode is a user-defined named network."""
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
@@ -429,15 +441,16 @@ def test_network_policy_rejected_on_user_defined_network(mock_docker):
     )
 
     with pytest.raises(HTTPException) as exc:
-        service.create_sandbox(request)
+        await service.create_sandbox(request)
 
     assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
     assert exc.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
     assert "my-custom-net" in exc.value.detail["message"]
 
 
+@pytest.mark.asyncio
 @patch("src.services.docker.docker")
-def test_create_sandbox_fails_when_user_defined_network_not_found(mock_docker):
+async def test_create_sandbox_fails_when_user_defined_network_not_found(mock_docker):
     """create_sandbox raises 400 with a clear message when the named network does not exist."""
     from docker.errors import NotFound as DockerNotFound
 
@@ -460,7 +473,7 @@ def test_create_sandbox_fails_when_user_defined_network_not_found(mock_docker):
     )
 
     with pytest.raises(HTTPException) as exc:
-        service.create_sandbox(request)
+        await service.create_sandbox(request)
 
     assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
     assert exc.value.detail["code"] == SandboxErrorCodes.INVALID_PARAMETER
@@ -468,8 +481,9 @@ def test_create_sandbox_fails_when_user_defined_network_not_found(mock_docker):
     assert "docker network create" in exc.value.detail["message"]
 
 
+@pytest.mark.asyncio
 @patch("src.services.docker.docker")
-def test_create_sandbox_user_defined_network_uses_correct_network_mode(mock_docker):
+async def test_create_sandbox_user_defined_network_uses_correct_network_mode(mock_docker):
     """Containers created on a user-defined network use the network name as network_mode."""
 
     def host_cfg_side_effect(**kwargs):
@@ -500,7 +514,7 @@ def test_create_sandbox_user_defined_network_uses_correct_network_mode(mock_dock
         patch.object(service, "_ensure_image_available"),
         patch.object(service, "_prepare_sandbox_runtime"),
     ):
-        service.create_sandbox(request)
+        await service.create_sandbox(request)
 
     call_kwargs = mock_client.api.create_container.call_args.kwargs
     assert call_kwargs["host_config"]["network_mode"] == "my-app-net"
@@ -722,8 +736,9 @@ def test_build_labels_marks_manual_cleanup_without_expiration():
     assert "opensandbox.io/expires-at" not in labels
 
 
+@pytest.mark.asyncio
 @patch("src.services.docker.docker")
-def test_create_sandbox_with_manual_cleanup_completes_full_create_path(mock_docker):
+async def test_create_sandbox_with_manual_cleanup_completes_full_create_path(mock_docker):
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
     mock_docker.from_env.return_value = mock_client
@@ -741,7 +756,7 @@ def test_create_sandbox_with_manual_cleanup_completes_full_create_path(mock_dock
         patch.object(service, "_create_and_start_container") as mock_create,
         patch.object(service, "_schedule_expiration") as mock_schedule,
     ):
-        response = service.create_sandbox(request)
+        response = await service.create_sandbox(request)
 
     assert response.expires_at is None
     assert response.metadata == {"team": "manual"}
@@ -794,8 +809,9 @@ def test_renew_expiration_rejects_manual_cleanup_sandbox():
     assert exc_info.value.detail["message"] == "Sandbox manual-id does not have automatic expiration enabled."
 
 
+@pytest.mark.asyncio
 @patch("src.services.docker.docker")
-def test_create_sandbox_async_returns_provisioning(mock_docker):
+async def test_create_sandbox_async_returns_provisioning(mock_docker):
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
     mock_docker.from_env.return_value = mock_client
@@ -811,7 +827,7 @@ def test_create_sandbox_async_returns_provisioning(mock_docker):
         entrypoint=["python", "app.py"],
     )
 
-    with patch.object(service, "create_sandbox") as mock_sync:
+    with patch.object(service, "create_sandbox", new_callable=AsyncMock) as mock_sync:
         mock_sync.return_value = CreateSandboxResponse(
             id="sandbox-sync",
             status=SandboxStatus(
@@ -825,15 +841,16 @@ def test_create_sandbox_async_returns_provisioning(mock_docker):
             createdAt=datetime.now(timezone.utc),
             entrypoint=["python", "app.py"],
         )
-        response = service.create_sandbox(request)
+        response = await service.create_sandbox(request)
 
     assert response.status.state == "Running"
     assert response.metadata == {"team": "async"}
     mock_sync.assert_called_once()
 
 
+@pytest.mark.asyncio
 @patch("src.services.docker.docker")
-def test_get_sandbox_returns_pending_state(mock_docker):
+async def test_get_sandbox_returns_pending_state(mock_docker):
     mock_client = MagicMock()
     mock_client.containers.list.return_value = []
     mock_docker.from_env.return_value = mock_client
@@ -849,7 +866,7 @@ def test_get_sandbox_returns_pending_state(mock_docker):
         entrypoint=["python", "app.py"],
     )
 
-    with patch.object(service, "create_sandbox") as mock_sync:
+    with patch.object(service, "create_sandbox", new_callable=AsyncMock) as mock_sync:
         mock_sync.return_value = CreateSandboxResponse(
             id="sandbox-sync",
             status=SandboxStatus(
@@ -863,7 +880,7 @@ def test_get_sandbox_returns_pending_state(mock_docker):
             createdAt=datetime.now(timezone.utc),
             entrypoint=["python", "app.py"],
         )
-        response = service.create_sandbox(request)
+        response = await service.create_sandbox(request)
 
     assert response.status.state == "Running"
     assert response.entrypoint == ["python", "app.py"]
@@ -1205,7 +1222,8 @@ class TestBuildVolumeBinds:
 class TestDockerVolumeValidation:
     """Tests for volume validation in DockerSandboxService.create_sandbox."""
 
-    def test_pvc_volume_not_found_rejected(self, mock_docker):
+    @pytest.mark.asyncio
+    async def test_pvc_volume_not_found_rejected(self, mock_docker):
         """PVC backend with non-existent Docker named volume should be rejected."""
         mock_client = MagicMock()
         mock_client.containers.list.return_value = []
@@ -1232,7 +1250,7 @@ class TestDockerVolumeValidation:
         )
 
         with pytest.raises(HTTPException) as exc_info:
-            service.create_sandbox(request)
+            await service.create_sandbox(request)
 
         assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
         assert exc_info.value.detail["code"] == SandboxErrorCodes.PVC_VOLUME_NOT_FOUND
@@ -1250,7 +1268,8 @@ class TestDockerVolumeValidation:
                 access_key_secret=None,
             )
 
-    def test_ossfs_mount_failure_rejected(self, mock_docker):
+    @pytest.mark.asyncio
+    async def test_ossfs_mount_failure_rejected(self, mock_docker):
         """OSSFS mount failure should be rejected."""
         mock_client = MagicMock()
         mock_client.containers.list.return_value = []
@@ -1285,7 +1304,7 @@ class TestDockerVolumeValidation:
                     with patch("src.services.ossfs_mixin.subprocess.run") as mock_run:
                         mock_run.return_value = MagicMock(returncode=1, stderr="mount failed")
                         with pytest.raises(HTTPException) as exc_info:
-                            service.create_sandbox(request)
+                            await service.create_sandbox(request)
 
         assert exc_info.value.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
         assert exc_info.value.detail["code"] == SandboxErrorCodes.OSSFS_MOUNT_FAILED
@@ -1414,7 +1433,8 @@ class TestDockerVolumeValidation:
         assert "--allow_other" in conf_lines
         assert "--umask=0022" in conf_lines
 
-    def test_ossfs_volume_binds_passed_to_docker(self, mock_docker):
+    @pytest.mark.asyncio
+    async def test_ossfs_volume_binds_passed_to_docker(self, mock_docker):
         """OSSFS volume should be converted to host bind path and passed to Docker."""
         mock_client = MagicMock()
         mock_client.containers.list.return_value = []
@@ -1455,7 +1475,7 @@ class TestDockerVolumeValidation:
                         with patch.object(service, "_ensure_image_available"), patch.object(
                             service, "_prepare_sandbox_runtime"
                         ):
-                            response = service.create_sandbox(request)
+                            response = await service.create_sandbox(request)
 
         assert response.status.state == "Running"
         assert mock_run.called
@@ -1676,7 +1696,8 @@ class TestDockerVolumeValidation:
 
         assert service._ossfs_mount_ref_counts.get(mount_key) == 1
 
-    def test_pvc_volume_inspect_failure_returns_500(self, mock_docker):
+    @pytest.mark.asyncio
+    async def test_pvc_volume_inspect_failure_returns_500(self, mock_docker):
         """Docker API failure during volume inspection should return 500."""
         mock_client = MagicMock()
         mock_client.containers.list.return_value = []
@@ -1702,12 +1723,13 @@ class TestDockerVolumeValidation:
         )
 
         with pytest.raises(HTTPException) as exc_info:
-            service.create_sandbox(request)
+            await service.create_sandbox(request)
 
         assert exc_info.value.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
         assert exc_info.value.detail["code"] == SandboxErrorCodes.PVC_VOLUME_INSPECT_FAILED
 
-    def test_pvc_volume_binds_passed_to_docker(self, mock_docker):
+    @pytest.mark.asyncio
+    async def test_pvc_volume_binds_passed_to_docker(self, mock_docker):
         """PVC volume binds should be passed to Docker host config as named volume refs."""
         mock_client = MagicMock()
         mock_client.containers.list.return_value = []
@@ -1740,7 +1762,7 @@ class TestDockerVolumeValidation:
             patch.object(service, "_ensure_image_available"),
             patch.object(service, "_prepare_sandbox_runtime"),
         ):
-            response = service.create_sandbox(request)
+            response = await service.create_sandbox(request)
 
         assert response.status.state == "Running"
 
@@ -1751,7 +1773,8 @@ class TestDockerVolumeValidation:
         assert len(binds) == 1
         assert binds[0] == "my-shared-volume:/mnt/data:rw"
 
-    def test_pvc_volume_readonly_binds_passed_to_docker(self, mock_docker):
+    @pytest.mark.asyncio
+    async def test_pvc_volume_readonly_binds_passed_to_docker(self, mock_docker):
         """PVC volume with read-only should produce ':ro' bind string."""
         mock_client = MagicMock()
         mock_client.containers.list.return_value = []
@@ -1784,13 +1807,14 @@ class TestDockerVolumeValidation:
             patch.object(service, "_ensure_image_available"),
             patch.object(service, "_prepare_sandbox_runtime"),
         ):
-            service.create_sandbox(request)
+            await service.create_sandbox(request)
 
         host_config_call = mock_client.api.create_host_config.call_args
         binds = host_config_call.kwargs["binds"]
         assert binds[0] == "shared-models:/mnt/models:ro"
 
-    def test_pvc_subpath_non_local_driver_rejected(self, mock_docker):
+    @pytest.mark.asyncio
+    async def test_pvc_subpath_non_local_driver_rejected(self, mock_docker):
         """PVC with subPath on a non-local driver should be rejected."""
         mock_client = MagicMock()
         mock_client.containers.list.return_value = []
@@ -1821,12 +1845,13 @@ class TestDockerVolumeValidation:
         )
 
         with pytest.raises(HTTPException) as exc_info:
-            service.create_sandbox(request)
+            await service.create_sandbox(request)
 
         assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
         assert exc_info.value.detail["code"] == SandboxErrorCodes.PVC_SUBPATH_UNSUPPORTED_DRIVER
 
-    def test_pvc_subpath_symlink_escape_rejected(self, mock_docker):
+    @pytest.mark.asyncio
+    async def test_pvc_subpath_symlink_escape_rejected(self, mock_docker):
         """PVC with subPath that resolves outside mountpoint via symlink should be rejected."""
         mock_client = MagicMock()
         mock_client.containers.list.return_value = []
@@ -1861,13 +1886,14 @@ class TestDockerVolumeValidation:
         with patch("src.services.docker.os.path.realpath") as mock_realpath:
             mock_realpath.side_effect = lambda p, **kwargs: ("/" if p.endswith("datasets") else p)
             with pytest.raises(HTTPException) as exc_info:
-                service.create_sandbox(request)
+                await service.create_sandbox(request)
 
         assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
         assert exc_info.value.detail["code"] == SandboxErrorCodes.INVALID_SUB_PATH
         assert "symlink" in exc_info.value.detail["message"]
 
-    def test_pvc_subpath_binds_resolved_to_mountpoint(self, mock_docker):
+    @pytest.mark.asyncio
+    async def test_pvc_subpath_binds_resolved_to_mountpoint(self, mock_docker):
         """PVC with subPath should resolve Mountpoint+subPath and pass as bind mount."""
         mock_client = MagicMock()
         mock_client.containers.list.return_value = []
@@ -1905,14 +1931,15 @@ class TestDockerVolumeValidation:
             patch.object(service, "_ensure_image_available"),
             patch.object(service, "_prepare_sandbox_runtime"),
         ):
-            service.create_sandbox(request)
+            await service.create_sandbox(request)
 
         host_config_call = mock_client.api.create_host_config.call_args
         binds = host_config_call.kwargs["binds"]
         assert len(binds) == 1
         assert binds[0] == "/var/lib/docker/volumes/my-vol/_data/datasets/train:/mnt/train:ro"
 
-    def test_host_path_not_found_rejected(self, mock_docker):
+    @pytest.mark.asyncio
+    async def test_host_path_not_found_rejected(self, mock_docker):
         """Host path create failure should return 500 with HOST_PATH_CREATE_FAILED."""
         mock_client = MagicMock()
         mock_client.containers.list.return_value = []
@@ -1939,12 +1966,13 @@ class TestDockerVolumeValidation:
 
         with patch("src.services.docker.os.makedirs", side_effect=PermissionError("denied")):
             with pytest.raises(HTTPException) as exc_info:
-                service.create_sandbox(request)
+                await service.create_sandbox(request)
 
         assert exc_info.value.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
         assert exc_info.value.detail["code"] == SandboxErrorCodes.HOST_PATH_CREATE_FAILED
 
-    def test_host_path_not_in_allowlist_rejected(self, mock_docker):
+    @pytest.mark.asyncio
+    async def test_host_path_not_in_allowlist_rejected(self, mock_docker):
         """Host path not in allowlist should be rejected."""
         mock_client = MagicMock()
         mock_client.containers.list.return_value = []
@@ -1972,12 +2000,13 @@ class TestDockerVolumeValidation:
         )
 
         with pytest.raises(HTTPException) as exc_info:
-            service.create_sandbox(request)
+            await service.create_sandbox(request)
 
         assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
         assert exc_info.value.detail["code"] == SandboxErrorCodes.HOST_PATH_NOT_ALLOWED
 
-    def test_no_volumes_passes_validation(self, mock_docker):
+    @pytest.mark.asyncio
+    async def test_no_volumes_passes_validation(self, mock_docker):
         """Request without volumes should pass validation."""
         mock_client = MagicMock()
         mock_client.containers.list.return_value = []
@@ -2001,11 +2030,12 @@ class TestDockerVolumeValidation:
             patch.object(service, "_ensure_image_available"),
             patch.object(service, "_prepare_sandbox_runtime"),
         ):
-            response = service.create_sandbox(request)
+            response = await service.create_sandbox(request)
 
         assert response.status.state == "Running"
 
-    def test_host_volume_binds_passed_to_docker(self, mock_docker):
+    @pytest.mark.asyncio
+    async def test_host_volume_binds_passed_to_docker(self, mock_docker):
         """Host volume binds should be passed to Docker host config."""
         mock_client = MagicMock()
         mock_client.containers.list.return_value = []
@@ -2040,7 +2070,7 @@ class TestDockerVolumeValidation:
                 patch.object(service, "_ensure_image_available"),
                 patch.object(service, "_prepare_sandbox_runtime"),
             ):
-                service.create_sandbox(request)
+                await service.create_sandbox(request)
 
             # Verify binds were passed to create_host_config
             host_config_call = mock_client.api.create_host_config.call_args
@@ -2049,7 +2079,8 @@ class TestDockerVolumeValidation:
             assert len(binds) == 1
             assert binds[0] == f"{tmpdir}:/mnt/work:rw"
 
-    def test_host_volume_with_subpath_resolved_correctly(self, mock_docker):
+    @pytest.mark.asyncio
+    async def test_host_volume_with_subpath_resolved_correctly(self, mock_docker):
         """Host volume subPath should be resolved and validated."""
         mock_client = MagicMock()
         mock_client.containers.list.return_value = []
@@ -2089,14 +2120,15 @@ class TestDockerVolumeValidation:
                 patch.object(service, "_ensure_image_available"),
                 patch.object(service, "_prepare_sandbox_runtime"),
             ):
-                service.create_sandbox(request)
+                await service.create_sandbox(request)
 
             host_config_call = mock_client.api.create_host_config.call_args
             binds = host_config_call.kwargs["binds"]
             assert len(binds) == 1
             assert binds[0] == f"{sub_dir}:/mnt/work:ro"
 
-    def test_host_subpath_auto_created(self, mock_docker):
+    @pytest.mark.asyncio
+    async def test_host_subpath_auto_created(self, mock_docker):
         """Host volume with non-existent subPath should be auto-created."""
         mock_client = MagicMock()
         mock_client.containers.list.return_value = []
@@ -2139,7 +2171,7 @@ class TestDockerVolumeValidation:
             # (mock doesn't cover the full flow).  We only care that the
             # directory was created — NOT that it raised HOST_PATH_CREATE_FAILED.
             try:
-                service.create_sandbox(request)
+                await service.create_sandbox(request)
             except HTTPException as e:
                 # If it's our own create-failed error, the auto-create didn't
                 # work — let the test fail explicitly.
@@ -2150,7 +2182,8 @@ class TestDockerVolumeValidation:
 
             assert os.path.isdir(resolved)
 
-    def test_empty_allowlist_permits_any_host_path(self, mock_docker):
+    @pytest.mark.asyncio
+    async def test_empty_allowlist_permits_any_host_path(self, mock_docker):
         """Empty allowed_host_paths (default) should permit any valid host path."""
         mock_client = MagicMock()
         mock_client.containers.list.return_value = []
@@ -2188,11 +2221,12 @@ class TestDockerVolumeValidation:
                 patch.object(service, "_ensure_image_available"),
                 patch.object(service, "_prepare_sandbox_runtime"),
             ):
-                response = service.create_sandbox(request)
+                response = await service.create_sandbox(request)
 
             assert response.status.state == "Running"
 
-    def test_no_volumes_omits_binds_from_host_config(self, mock_docker):
+    @pytest.mark.asyncio
+    async def test_no_volumes_omits_binds_from_host_config(self, mock_docker):
         """When no volumes are specified, 'binds' should not appear in Docker host config."""
         mock_client = MagicMock()
         mock_client.containers.list.return_value = []
@@ -2216,7 +2250,7 @@ class TestDockerVolumeValidation:
             patch.object(service, "_ensure_image_available"),
             patch.object(service, "_prepare_sandbox_runtime"),
         ):
-            service.create_sandbox(request)
+            await service.create_sandbox(request)
 
         host_config_call = mock_client.api.create_host_config.call_args
         assert "binds" not in host_config_call.kwargs

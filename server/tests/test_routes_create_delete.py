@@ -31,7 +31,7 @@ def test_create_sandbox_returns_202_and_service_payload(
 
     class StubService:
         @staticmethod
-        def create_sandbox(request) -> CreateSandboxResponse:
+        async def create_sandbox(request) -> CreateSandboxResponse:
             calls.append(request)
             return CreateSandboxResponse(
                 id="sbx-001",
@@ -70,7 +70,7 @@ def test_create_sandbox_manual_cleanup_returns_null_expiration(
 
     class StubService:
         @staticmethod
-        def create_sandbox(request) -> CreateSandboxResponse:
+        async def create_sandbox(request) -> CreateSandboxResponse:
             return CreateSandboxResponse(
                 id="sbx-manual",
                 status=SandboxStatus(state="Pending"),

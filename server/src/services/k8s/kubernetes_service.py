@@ -19,6 +19,7 @@ This module provides a Kubernetes implementation of the sandbox service interfac
 using Kubernetes resources for sandbox lifecycle management.
 """
 
+import asyncio
 import logging
 import time
 from datetime import datetime, timezone
@@ -39,7 +40,7 @@ from src.api.schema import (
     Sandbox,
     SandboxStatus,
 )
-from src.config import AppConfig, get_config
+from src.config import AppConfig, EGRESS_MODE_DNS, get_config
 from src.services.constants import (
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
     SANDBOX_ID_LABEL,
@@ -138,7 +139,7 @@ class KubernetesSandboxService(SandboxService):
             self.execd_image,
         )
     
-    def _wait_for_sandbox_ready(
+    async def _wait_for_sandbox_ready(
         self,
         sandbox_id: str,
         timeout_seconds: int = 60,
@@ -205,7 +206,7 @@ class KubernetesSandboxService(SandboxService):
                 )
             
             # Wait before next poll
-            time.sleep(poll_interval_seconds)
+            await asyncio.sleep(poll_interval_seconds)
         
         # Timeout
         elapsed = time.time() - start_time
@@ -250,7 +251,7 @@ class KubernetesSandboxService(SandboxService):
             },
         )
 
-    def create_sandbox(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
+    async def create_sandbox(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
         """
         Create a new sandbox using Kubernetes Pod.
         
@@ -302,6 +303,11 @@ class KubernetesSandboxService(SandboxService):
             resource_limits = request.resource_limits.root
         
         try:
+            egress_mode = (
+                self.app_config.egress.mode
+                if self.app_config.egress
+                else EGRESS_MODE_DNS
+            )
             # Get egress image if network policy is provided
             egress_image = None
             egress_auth_token = None
@@ -332,6 +338,7 @@ class KubernetesSandboxService(SandboxService):
                 network_policy=request.network_policy,
                 egress_image=egress_image,
                 egress_auth_token=egress_auth_token,
+                egress_mode=egress_mode,
                 volumes=request.volumes,
             )
             
@@ -343,7 +350,7 @@ class KubernetesSandboxService(SandboxService):
             
             # Wait for Pod to be Running with IP
             try:
-                workload = self._wait_for_sandbox_ready(
+                workload = await self._wait_for_sandbox_ready(
                     sandbox_id=sandbox_id,
                     timeout_seconds=self.app_config.kubernetes.sandbox_create_timeout_seconds,
                     poll_interval_seconds=self.app_config.kubernetes.sandbox_create_poll_interval_seconds,

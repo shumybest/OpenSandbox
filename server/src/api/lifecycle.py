@@ -104,7 +104,7 @@ async def create_sandbox(
         HTTPException: If sandbox creation scheduling fails
     """
 
-    return sandbox_service.create_sandbox(request)
+    return await sandbox_service.create_sandbox(request)
 
 
 # Search endpoint
