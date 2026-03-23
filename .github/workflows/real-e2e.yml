@@ -42,6 +42,7 @@ jobs:
           docker ps -aq --filter "label=opensandbox" | xargs -r docker rm -f || true
           # Remove root-owned files from previous sandbox runs by mounting parent dir
           docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
+          docker image prune -f || true
 
       - name: Build local egress image
         run: docker build -t opensandbox/egress:local -f components/egress/Dockerfile .
@@ -122,6 +123,7 @@ jobs:
         run: |
           docker ps -aq --filter "label=opensandbox" | xargs -r docker rm -f || true
           docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
+          docker image prune -f || true
 
       - name: Build local egress image
         run: docker build -t opensandbox/egress:local -f components/egress/Dockerfile .
@@ -218,6 +220,7 @@ jobs:
         run: |
           docker ps -aq --filter "label=opensandbox" | xargs -r docker rm -f || true
           docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
+          docker image prune -f || true
 
       - name: Build local egress image
         run: docker build -t opensandbox/egress:local -f components/egress/Dockerfile .
@@ -300,6 +303,7 @@ jobs:
         run: |
           docker ps -aq --filter "label=opensandbox" | xargs -r docker rm -f || true
           docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
+          docker image prune -f || true
 
       - name: Build local egress image
         run: docker build -t opensandbox/egress:local -f components/egress/Dockerfile .
