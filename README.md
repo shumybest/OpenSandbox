@@ -34,6 +34,9 @@
   <a href="https://github.com/alibaba/OpenSandbox/actions">
     <img src="https://github.com/alibaba/OpenSandbox/actions/workflows/real-e2e.yml/badge.svg?branch=main" alt="E2E Status" />
   </a>
+  <a href="https://github.com/alibaba/OpenSandbox/actions">
+    <img src="https://github.com/alibaba/OpenSandbox/actions/workflows/kubernetes-nightly-build.yml/badge.svg?branch=main" alt="E2E Status" />
+  </a>
 </p>
 
   <hr />
@@ -47,49 +50,76 @@ OpenSandbox is now listed in the [CNCF Landscape](https://landscape.cncf.io/?ite
 
 ## Features
 
-- **Multi-language SDKs**: Provides sandbox SDKs in Python, Java/Kotlin, JavaScript/TypeScript, C#/.NET, Go (Roadmap), and more.
+- **Multi-language SDKs**: Provides sandbox SDKs in Python, Java/Kotlin, JavaScript/TypeScript, C#/.NET, Go.
 - **Sandbox Protocol**: Defines sandbox lifecycle management APIs and sandbox execution APIs so you can extend custom sandbox runtimes.
 - **Sandbox Runtime**: Built-in lifecycle management supporting Docker and [high-performance Kubernetes runtime](./kubernetes), enabling both local runs and large-scale distributed scheduling.
 - **Sandbox Environments**: Built-in Command, Filesystem, and Code Interpreter implementations. Examples cover Coding Agents (e.g., Claude Code), browser automation (Chrome, Playwright), and desktop environments (VNC, VS Code).
 - **Network Policy**: Unified [Ingress Gateway](components/ingress) with multiple routing strategies plus per-sandbox [egress controls](components/egress).
 - **Strong Isolation**: Supports secure container runtimes like gVisor, Kata Containers, and Firecracker microVM for enhanced isolation between sandbox workloads and the host. See [Secure Container Runtime Guide](docs/secure-container.md) for details.
 
-## Examples
+## SDKs
 
-### Basic Sandbox Operations
+Python:
+
+```bash
+pip install opensandbox
+```
+
+Java/Kotlin (Gradle Kotlin DSL):
+
+```kotlin
+dependencies {
+    implementation("com.alibaba.opensandbox:sandbox:{latest_version}")
+}
+```
+
+Java/Kotlin (Maven):
+
+```xml
+<dependency>
+    <groupId>com.alibaba.opensandbox</groupId>
+    <artifactId>sandbox</artifactId>
+    <version>{latest_version}</version>
+</dependency>
+```
+
+JavaScript/TypeScript:
+
+```bash
+npm install @alibaba-group/opensandbox
+```
+
+C#/.NET:
+
+```bash
+dotnet add package Alibaba.OpenSandbox
+```
+
+Go:
+
+```bash
+go get github.com/alibaba/OpenSandbox/sdks/sandbox/go
+```
+
+## Getting Started
 
 Requirements:
 
 - Docker (required for local execution)
-- Python 3.10+ (recommended for examples and local runtime)
+- Python 3.10+ (required for examples and local runtime)
 
-#### 1. Install and Configure the Sandbox Server
-
-```bash
-uv pip install opensandbox-server
-opensandbox-server init-config ~/.sandbox.toml --example docker
-```
-
-> If you prefer working from source, you can still clone the repo for development, but you no longer need to clone this repository just to start the server.
-> You'll also require an instance of docker running.
-> ```bash
-> git clone https://github.com/alibaba/OpenSandbox.git
-> cd OpenSandbox/server
-> uv sync
-> cp example.config.toml ~/.sandbox.toml # Copy configuration file
-> uv run python -m src.main # Start the service
-> ```
-
-#### 2. Start the Sandbox Server
+### Install and Configure the Sandbox Server
 
 ```bash
-opensandbox-server
+uvx opensandbox-server init-config ~/.sandbox.toml --example docker
+
+uvx opensandbox-server
 
 # Show help
-opensandbox-server -h
+# uvx opensandbox-server -h
 ```
 
-#### 3. Create a Code Interpreter and Execute Commands
+### Create a Code Interpreter and Execute Commands/Codes
 
 Install the Code Interpreter SDK
 
@@ -97,7 +127,7 @@ Install the Code Interpreter SDK
 uv pip install opensandbox-code-interpreter
 ```
 
-Create a sandbox and execute commands
+Create a sandbox and execute commands and codes.
 
 ```python
 import asyncio
@@ -164,16 +194,13 @@ OpenSandbox provides examples covering SDK usage, agent integrations, browser au
 - **[code-interpreter](examples/code-interpreter/README.md)** - End-to-end Code Interpreter SDK workflow in a sandbox.
 - **[aio-sandbox](examples/aio-sandbox/README.md)** - All-in-One sandbox setup using the OpenSandbox SDK.
 - **[agent-sandbox](examples/agent-sandbox/README.md)** - Example integration for running OpenSandbox workloads on Kubernetes with [kubernetes-sigs/agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox).
+- **Volumes** — [Docker PVC / named volumes](examples/docker-pvc-volume-mount/README.md), [Docker OSSFS](examples/docker-ossfs-volume-mount/README.md), [Kubernetes PVC](examples/kubernetes-pvc-volume-mount/README.md): persistent and shared storage patterns.
 
 #### 🤖 Coding Agent Integrations
 
-- **[claude-code](examples/claude-code/README.md)** - Run Claude Code inside OpenSandbox.
-- **[gemini-cli](examples/gemini-cli/README.md)** - Run Google Gemini CLI inside OpenSandbox.
-- **[codex-cli](examples/codex-cli/README.md)** - Run OpenAI Codex CLI inside OpenSandbox.
-- **[kimi-cli](examples/kimi-cli/README.md)** - Run [Kimi CLI](https://github.com/MoonshotAI/kimi-cli) (Moonshot AI) inside OpenSandbox.
+- **Coding CLIs** — [Claude Code](examples/claude-code/README.md), [Gemini CLI](examples/gemini-cli/README.md), [OpenAI Codex CLI](examples/codex-cli/README.md), [Qwen Code](examples/qwen-code/README.md), [Kimi CLI](examples/kimi-cli/README.md): run each vendor CLI inside OpenSandbox.
 - **[langgraph](examples/langgraph/README.md)** - LangGraph state-machine workflow that creates/runs a sandbox job with fallback retry.
 - **[google-adk](examples/google-adk/README.md)** - Google ADK agent using OpenSandbox tools to write/read files and run commands.
-- **[nullclaw](examples/nullclaw/README.md)** - Launch a [Nullclaw](https://github.com/nullclaw/nullclaw) Gateway inside a sandbox.
 - **[openclaw](examples/openclaw/README.md)** - Launch an OpenClaw Gateway inside a sandbox.
 
 #### 🌐 Browser and Desktop Environments
@@ -214,7 +241,7 @@ For detailed architecture, see [docs/architecture.md](docs/architecture.md).
 - [docs/architecture.md](docs/architecture.md) – Overall architecture & design philosophy
 - [oseps/README.md](oseps/README.md) – OpenSandbox Enhancement Proposals
 - SDK
-  - Sandbox base SDK ([Java/Kotlin SDK](sdks/sandbox/kotlin/README.md), [Python SDK](sdks/sandbox/python/README.md), [JavaScript/TypeScript SDK](sdks/sandbox/javascript/README.md), [C#/.NET SDK](sdks/sandbox/csharp/README.md)) - includes sandbox lifecycle, command execution, file operations
+  - Sandbox base SDK ([Java/Kotlin SDK](sdks/sandbox/kotlin/README.md), [Python SDK](sdks/sandbox/python/README.md), [JavaScript/TypeScript SDK](sdks/sandbox/javascript/README.md), [C#/.NET SDK](sdks/sandbox/csharp/README.md)), [Go SDK](sdks/sandbox/go/README.md) - includes sandbox lifecycle, command execution, file operations
   - Code Interpreter SDK ([Java/Kotlin SDK](sdks/code-interpreter/kotlin/README.md), [Python SDK](sdks/code-interpreter/python/README.md), [JavaScript/TypeScript SDK](sdks/code-interpreter/javascript/README.md), [C#/.NET SDK](sdks/code-interpreter/csharp/README.md)) - code interpreter
 - [specs/README.md](specs/README.md) - OpenAPI definitions for sandbox lifecycle API and sandbox execution API
 - [server/README.md](server/README.md) - Sandbox server startup and configuration; supports Docker and Kubernetes runtimes

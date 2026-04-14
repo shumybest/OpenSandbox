@@ -554,7 +554,7 @@ test("01g sandbox manager: list + get", async () => {
   expect(info.metadata?.tag).toBe("e2e-test");
 });
 
-test("02 command execution: success, cwd, background, failure", async () => {
+test("02 command execution: success, working directory, background, failure", async () => {
   if (!sandbox) throw new Error("sandbox not created");
 
   const stdoutMessages: OutputMessage[] = [];
@@ -595,6 +595,9 @@ test("02 command execution: success, cwd, background, failure", async () => {
   expect(ok.logs.stdout).toHaveLength(1);
   expect(ok.logs.stdout[0]?.text).toBe("Hello OpenSandbox E2E");
   assertRecentTimestampMs(ok.logs.stdout[0]!.timestamp);
+  expect(ok.exitCode).toBe(0);
+  expect(ok.complete).toBeTruthy();
+  expect(ok.complete!.executionTimeMs).toBeGreaterThanOrEqual(0);
 
   expect(initEvents).toHaveLength(1);
   expect(completedEvents).toHaveLength(1);
@@ -603,10 +606,13 @@ test("02 command execution: success, cwd, background, failure", async () => {
   const pwd = await sandbox.commands.run("pwd", { workingDirectory: "/tmp" });
   expect(pwd.error).toBeUndefined();
   expect(pwd.logs.stdout[0]?.text).toBe("/tmp");
+  expect(pwd.exitCode).toBe(0);
+  expect(pwd.complete).toBeTruthy();
 
   const start = Date.now();
-  await sandbox.commands.run("sleep 30", { background: true });
+  const bg = await sandbox.commands.run("sleep 30", { background: true });
   expect(Date.now() - start).toBeLessThan(10_000);
+  expect(bg.exitCode ?? null).toBeNull();
 
   // failure contract: error exists; completion should be absent
   stdoutMessages.length = 0;
@@ -630,6 +636,8 @@ test("02 command execution: success, cwd, background, failure", async () => {
       m.text.includes("nonexistent-command-that-does-not-exist")
     )
   ).toBe(true);
+  expect(fail.complete).toBeUndefined();
+  expect(fail.exitCode).toBe(Number(fail.error?.value));
   expect(completedEvents.length).toBe(0);
 });
 
@@ -685,6 +693,61 @@ test("02b command env injection", async () => {
   expect(injected.error).toBeUndefined();
   const injectedOutput = injected.logs.stdout.map((m) => m.text).join("\n").trim();
   expect(injectedOutput).toBe(envValue);
+});
+
+test("02c bash session API: working directory and env persistence", async () => {
+  if (!sandbox) throw new Error("sandbox not created");
+
+  const sid = await sandbox.commands.createSession({ workingDirectory: "/tmp" });
+  expect(typeof sid).toBe("string");
+  expect(sid.length).toBeGreaterThan(0);
+
+  let run = await sandbox.commands.runInSession(sid, "pwd");
+  expect(run.error).toBeUndefined();
+  expect(run.exitCode).toBe(0);
+  expect(run.logs.stdout.map((m) => m.text).join("").trim()).toBe("/tmp");
+
+  run = await sandbox.commands.runInSession(sid, "pwd", { workingDirectory: "/var" });
+  expect(run.error).toBeUndefined();
+  expect(run.exitCode).toBe(0);
+  expect(run.logs.stdout.map((m) => m.text).join("").trim()).toBe("/var");
+
+  run = await sandbox.commands.runInSession(sid, "pwd", { workingDirectory: "/tmp" });
+  expect(run.error).toBeUndefined();
+  expect(run.exitCode).toBe(0);
+  expect(run.logs.stdout.map((m) => m.text).join("").trim()).toBe("/tmp");
+
+  run = await sandbox.commands.runInSession(
+    sid,
+    "export E2E_SESSION_ENV=session-env-ok"
+  );
+  expect(run.error).toBeUndefined();
+
+  run = await sandbox.commands.runInSession(sid, "echo $E2E_SESSION_ENV");
+  expect(run.error).toBeUndefined();
+  expect(run.exitCode).toBe(0);
+  expect(run.logs.stdout.map((m) => m.text).join("").trim()).toBe(
+    "session-env-ok"
+  );
+
+  run = await sandbox.commands.runInSession(
+    sid,
+    "sh -c 'echo session-fail >&2; exit 7'",
+  );
+  expect(run.error?.name).toBe("CommandExecError");
+  expect(run.error?.value).toBe("7");
+  expect(run.exitCode).toBe(7);
+  expect(run.complete).toBeUndefined();
+
+  const sid2 = await sandbox.commands.createSession({ workingDirectory: "/var" });
+  expect(typeof sid2).toBe("string");
+  run = await sandbox.commands.runInSession(sid2, "pwd");
+  expect(run.error).toBeUndefined();
+  expect(run.exitCode).toBe(0);
+  expect(run.logs.stdout.map((m) => m.text).join("").trim()).toBe("/var");
+
+  await sandbox.commands.deleteSession(sid);
+  await sandbox.commands.deleteSession(sid2);
 });
 
 test("03 filesystem operations: CRUD + replace/move/delete + range + stream", async () => {

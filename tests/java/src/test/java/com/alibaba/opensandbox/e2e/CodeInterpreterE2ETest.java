@@ -30,6 +30,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.*;
+import java.lang.reflect.Method;
 import org.junit.jupiter.api.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,7 +41,7 @@ import org.slf4j.LoggerFactory;
  * <p>Tests code execution capabilities including: - Multi-language code execution (Java, Python,
  * Go, TypeScript) - Session state management and variable persistence - Context isolation between
  * different execution contexts - Error handling and recovery mechanisms - Event handling patterns
- * identical to runCommand
+ * from code-interpreter/Jupyter streams
  *
  * <p>Uses the shared CodeInterpreter instance from BaseE2ETest.
  */
@@ -53,6 +54,7 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
 
     private Sandbox sandbox;
     private CodeInterpreter codeInterpreter;
+    private boolean isolatedSandboxForCurrentTest = false;
 
     private static void assertTerminalEventContract(
             List<ExecutionInit> initEvents,
@@ -82,6 +84,44 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
 
     @BeforeAll
     void setup() {
+        createInterpreterWithTag("e2e-code-interpreter");
+        assertNotNull(codeInterpreter);
+        assertNotNull(codeInterpreter.getId());
+    }
+
+    @BeforeEach
+    void maybeRecreateInterpreterForHighFlakinessTests(TestInfo testInfo) {
+        String methodName =
+                testInfo.getTestMethod().map(Method::getName).orElse("");
+        if (!shouldIsolatePerTest(methodName)) {
+            isolatedSandboxForCurrentTest = false;
+            return;
+        }
+        closeCurrentSandboxQuietly();
+        createInterpreterWithTag("e2e-code-interpreter-isolated");
+        isolatedSandboxForCurrentTest = true;
+    }
+
+    @AfterEach
+    void cleanupIsolatedSandboxAfterEach() {
+        if (!isolatedSandboxForCurrentTest) {
+            return;
+        }
+        closeCurrentSandboxQuietly();
+        isolatedSandboxForCurrentTest = false;
+    }
+
+    private boolean shouldIsolatePerTest(String methodName) {
+        return methodName.equals("testJavaCodeExecution")
+                || methodName.equals("testPythonCodeExecution")
+                || methodName.equals("testGoCodeExecution")
+                || methodName.equals("testTypeScriptCodeExecution")
+                || methodName.equals("testMultiLanguageAndContextIsolation")
+                || methodName.equals("testConcurrentCodeExecution")
+                || methodName.equals("testCodeExecutionInterrupt");
+    }
+
+    private void createInterpreterWithTag(String metadataTag) {
         Volume volume =
                 Volume.builder()
                         .name("execd-logs")
@@ -97,7 +137,7 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
                         .resource(java.util.Map.of("cpu", "2", "memory", "4Gi"))
                         .timeout(Duration.ofMinutes(20))
                         .readyTimeout(Duration.ofSeconds(60))
-                        .metadata(java.util.Map.of("tag", "e2e-code-interpreter"))
+                        .metadata(java.util.Map.of("tag", metadataTag))
                         .env("E2E_TEST", "true")
                         .env("GO_VERSION", "1.25")
                         .env("JAVA_VERSION", "21")
@@ -108,22 +148,27 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
                         .volume(volume)
                         .build();
         codeInterpreter = CodeInterpreter.builder().fromSandbox(sandbox).build();
-        assertNotNull(codeInterpreter);
-        assertNotNull(codeInterpreter.getId());
+    }
+
+    private void closeCurrentSandboxQuietly() {
+        if (sandbox == null) {
+            return;
+        }
+        try {
+            sandbox.kill();
+        } catch (Exception ignored) {
+        }
+        try {
+            sandbox.close();
+        } catch (Exception ignored) {
+        }
+        sandbox = null;
+        codeInterpreter = null;
     }
 
     @AfterAll
     void teardown() {
-        if (sandbox != null) {
-            try {
-                sandbox.kill();
-            } catch (Exception ignored) {
-            }
-            try {
-                sandbox.close();
-            } catch (Exception ignored) {
-            }
-        }
+        closeCurrentSandboxQuietly();
     }
 
     // ==========================================
@@ -224,6 +269,9 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
         assertNotNull(simpleResult.getId());
         assertFalse(simpleResult.getId().isBlank());
         assertEquals("4", simpleResult.getResult().get(0).getText());
+        assertNull(simpleResult.getExitCode());
+        assertNotNull(simpleResult.getComplete());
+        assertTrue(simpleResult.getComplete().getExecutionTimeInMillis() >= 0);
         assertTerminalEventContract(initEvents, completedEvents, errors, simpleResult.getId());
         assertTrue(errors.isEmpty());
         assertTrue(stdoutMessages.stream().anyMatch(m -> m.getText().contains("Hello from Java!")));
@@ -249,8 +297,12 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
         assertNotNull(varResult);
         assertNotNull(varResult.getId());
         assertEquals("4", varResult.getResult().get(0).getText());
+        assertNull(varResult.getExitCode());
+        assertNotNull(varResult.getComplete());
 
-        // 3. Java error handling test (mutually exclusive contract)
+        // 3. Java error handling test.
+        // Jupyter may emit execution_complete and error for the same run, so
+        // complete is not mutually exclusive with error here.
         stdoutMessages.clear();
         stderrMessages.clear();
         results.clear();
@@ -270,6 +322,7 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
         assertNotNull(errorResult.getId());
         assertNotNull(errorResult.getError());
         assertEquals("EvalException", errorResult.getError().getName());
+        assertNull(errorResult.getExitCode());
         assertTerminalEventContract(initEvents, completedEvents, errors, errorResult.getId());
     }
 
@@ -332,6 +385,9 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
 
         assertNotNull(simpleResult);
         assertNotNull(simpleResult.getId());
+        assertNull(simpleResult.getExitCode());
+        assertNotNull(simpleResult.getComplete());
+        assertTrue(simpleResult.getComplete().getExecutionTimeInMillis() >= 0);
         assertFalse(completedEvents.isEmpty());
         assertTrue(errors.isEmpty());
 
@@ -352,6 +408,8 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
         assertNotNull(varResult);
         assertNotNull(varResult.getId());
         assertEquals("4", varResult.getResult().get(0).getText());
+        assertNull(varResult.getExitCode());
+        assertNotNull(varResult.getComplete());
 
         // 3. Test variable persistence across executions
         RunCodeRequest persistRequest =
@@ -368,6 +426,8 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
 
         assertNotNull(persistResult);
         assertNotNull(persistResult.getId());
+        assertNull(persistResult.getExitCode());
+        assertNotNull(persistResult.getComplete());
 
         // 4. Python error handling
         RunCodeRequest errorRequest =
@@ -382,6 +442,7 @@ public class CodeInterpreterE2ETest extends BaseE2ETest {
 
         assertNotNull(errorResult);
         assertNotNull(errorResult.getId());
+        assertNull(errorResult.getExitCode());
         assertTrue(
                 errorResult.getError() != null || !errorResult.getLogs().getStderr().isEmpty(),
                 "Python error execution should capture runtime errors");

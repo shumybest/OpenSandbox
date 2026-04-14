@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
-from typing import Any, Generator, Sequence
+from typing import Any
 
 import click
 
@@ -105,6 +106,12 @@ class OutputFormatter:
 
     def success(self, msg: str) -> None:
         """Print a success message with ✅ icon."""
+        if self.fmt == "json":
+            self._print_json({"status": "ok", "message": msg})
+            return
+        if self.fmt == "yaml":
+            self._print_yaml({"status": "ok", "message": msg})
+            return
         if self.color:
             self.console.print(f"  [bold green]✅ {msg}[/]")
         else:
@@ -112,6 +119,12 @@ class OutputFormatter:
 
     def info(self, msg: str) -> None:
         """Print an info message with ℹ️  icon."""
+        if self.fmt == "json":
+            self._print_json({"status": "info", "message": msg})
+            return
+        if self.fmt == "yaml":
+            self._print_yaml({"status": "info", "message": msg})
+            return
         if self.color:
             self.console.print(f"  [bold blue]ℹ️  {msg}[/]")
         else:
@@ -119,6 +132,12 @@ class OutputFormatter:
 
     def warning(self, msg: str) -> None:
         """Print a warning message with ⚠️  icon."""
+        if self.fmt == "json":
+            self._print_json({"status": "warning", "message": msg})
+            return
+        if self.fmt == "yaml":
+            self._print_yaml({"status": "warning", "message": msg})
+            return
         if self.color:
             self._err_console.print(f"  [bold yellow]⚠️  {msg}[/]")
         else:
@@ -126,6 +145,12 @@ class OutputFormatter:
 
     def error(self, msg: str) -> None:
         """Print an error message with ❌ icon."""
+        if self.fmt == "json":
+            self._print_json({"status": "error", "message": msg})
+            return
+        if self.fmt == "yaml":
+            self._print_yaml({"status": "error", "message": msg})
+            return
         if self.color:
             self._err_console.print(f"  [bold red]❌ {msg}[/]")
         else:

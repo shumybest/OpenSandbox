@@ -19,6 +19,7 @@ using OpenSandbox.Factory;
 using OpenSandbox.Models;
 using OpenSandbox.Services;
 using Microsoft.Extensions.Logging.Abstractions;
+using Moq;
 using Xunit;
 
 namespace OpenSandbox.Tests;
@@ -62,6 +63,82 @@ public class SandboxEgressLifecycleTests
         egress.PatchRulesCallCount.Should().Be(1);
     }
 
+    [Fact]
+    public async Task CreateAsync_ShouldAcceptWindowsHostPath()
+    {
+        var sandboxes = new StubSandboxes();
+        var adapterFactory = new StubAdapterFactory(sandboxes, new StubEgress());
+
+        await using var sandbox = await Sandbox.CreateAsync(new SandboxCreateOptions
+        {
+            Image = "python:3.12",
+            ConnectionConfig = new ConnectionConfig(new ConnectionConfigOptions
+            {
+                Domain = "127.0.0.1:8080",
+                Protocol = ConnectionProtocol.Http
+            }),
+            AdapterFactory = adapterFactory,
+            SkipHealthCheck = true,
+            Volumes =
+            [
+                new Volume
+                {
+                    Name = "host-vol",
+                    Host = new Host { Path = "D:/sandbox-mnt/ReMe" },
+                    MountPath = "/mnt/data"
+                }
+            ],
+            Diagnostics = new SdkDiagnosticsOptions
+            {
+                LoggerFactory = NullLoggerFactory.Instance
+            }
+        });
+
+        sandboxes.LastCreateRequest.Should().NotBeNull();
+        sandboxes.LastCreateRequest!.Volumes.Should().NotBeNull();
+        sandboxes.LastCreateRequest.Volumes!.Should().ContainSingle();
+        sandboxes.LastCreateRequest.Volumes![0].Host!.Path.Should().Be("D:/sandbox-mnt/ReMe");
+    }
+
+    [Fact]
+    public async Task CreateAsync_ShouldRejectRelativeHostPath()
+    {
+        var sandboxes = new StubSandboxes();
+        var adapterFactory = new StubAdapterFactory(sandboxes, new StubEgress());
+
+        Func<Task> act = async () =>
+        {
+            await Sandbox.CreateAsync(new SandboxCreateOptions
+            {
+                Image = "python:3.12",
+                ConnectionConfig = new ConnectionConfig(new ConnectionConfigOptions
+                {
+                    Domain = "127.0.0.1:8080",
+                    Protocol = ConnectionProtocol.Http
+                }),
+                AdapterFactory = adapterFactory,
+                SkipHealthCheck = true,
+                Volumes =
+                [
+                    new Volume
+                    {
+                        Name = "host-vol",
+                        Host = new Host { Path = "relative/path" },
+                        MountPath = "/mnt/data"
+                    }
+                ],
+                Diagnostics = new SdkDiagnosticsOptions
+                {
+                    LoggerFactory = NullLoggerFactory.Instance
+                }
+            });
+        };
+
+        await act.Should().ThrowAsync<InvalidArgumentException>()
+            .WithMessage("Host path must be an absolute path starting with '/' or a Windows drive letter*");
+        adapterFactory.LifecycleStackCallCount.Should().Be(0);
+    }
+
     private sealed class StubAdapterFactory : IAdapterFactory
     {
         private readonly ISandboxes _sandboxes;
@@ -74,11 +151,13 @@ public class SandboxEgressLifecycleTests
         }
 
         public int EgressStackCallCount { get; private set; }
+        public int LifecycleStackCallCount { get; private set; }
 
         public string? LastEgressBaseUrl { get; private set; }
 
         public LifecycleStack CreateLifecycleStack(CreateLifecycleStackOptions options)
         {
+            LifecycleStackCallCount++;
             return new LifecycleStack
             {
                 Sandboxes = _sandboxes
@@ -89,7 +168,7 @@ public class SandboxEgressLifecycleTests
         {
             return new ExecdStack
             {
-                Commands = new StubCommands(),
+                Commands = new Mock<IExecdCommands>(MockBehavior.Strict).Object,
                 Files = new StubFiles(),
                 Health = new StubHealth(),
                 Metrics = new StubMetrics()
@@ -110,9 +189,11 @@ public class SandboxEgressLifecycleTests
     private sealed class StubSandboxes : ISandboxes
     {
         public List<int> EndpointCalls { get; } = new();
+        public CreateSandboxRequest? LastCreateRequest { get; private set; }
 
         public Task<CreateSandboxResponse> CreateSandboxAsync(CreateSandboxRequest request, CancellationToken cancellationToken = default)
         {
+            LastCreateRequest = request;
             return Task.FromResult(new CreateSandboxResponse
             {
                 Id = "sandbox-test-id",
@@ -182,24 +263,6 @@ public class SandboxEgressLifecycleTests
             PatchRulesCallCount++;
             return Task.CompletedTask;
         }
-    }
-
-    private sealed class StubCommands : IExecdCommands
-    {
-        public IAsyncEnumerable<ServerStreamEvent> RunStreamAsync(string command, RunCommandOptions? options = null, CancellationToken cancellationToken = default) =>
-            AsyncEnumerable.Empty<ServerStreamEvent>();
-
-        public Task<Execution> RunAsync(string command, RunCommandOptions? options = null, ExecutionHandlers? handlers = null, CancellationToken cancellationToken = default) =>
-            throw new NotImplementedException();
-
-        public Task<CommandStatus> GetCommandStatusAsync(string executionId, CancellationToken cancellationToken = default) =>
-            throw new NotImplementedException();
-
-        public Task<CommandLogs> GetBackgroundCommandLogsAsync(string executionId, long? cursor = null, CancellationToken cancellationToken = default) =>
-            throw new NotImplementedException();
-
-        public Task InterruptAsync(string executionId, CancellationToken cancellationToken = default) =>
-            throw new NotImplementedException();
     }
 
     private sealed class StubFiles : ISandboxFiles

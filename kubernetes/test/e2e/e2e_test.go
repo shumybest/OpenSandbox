@@ -176,6 +176,265 @@ var _ = Describe("Manager", Ordered, func() {
 			}, 2*time.Minute).Should(Succeed())
 		})
 
+		It("should handle pod eviction correctly", func() {
+			const poolName = "test-pool-eviction"
+			const testNamespace = "default"
+
+			By("creating a Pool")
+			poolYAML, err := renderTemplate("testdata/pool-basic.yaml", map[string]interface{}{
+				"PoolName":     poolName,
+				"SandboxImage": utils.SandboxImage,
+				"Namespace":    testNamespace,
+				"BufferMax":    4,
+				"BufferMin":    2,
+				"PoolMax":      6,
+				"PoolMin":      3,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			poolFile := filepath.Join("/tmp", poolName+".yaml")
+			err = os.WriteFile(poolFile, []byte(poolYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(poolFile)
+
+			cmd := exec.Command("kubectl", "apply", "-f", poolFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for Pool pods to be Running")
+			var allPoolPods []string
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods", "-n", testNamespace,
+					"-l", fmt.Sprintf("sandbox.opensandbox.io/pool-name=%s", poolName),
+					"--field-selector=status.phase=Running",
+					"-o", "jsonpath={.items[*].metadata.name}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				allPoolPods = strings.Fields(output)
+				g.Expect(len(allPoolPods)).To(BeNumerically(">=", 3))
+			}, 3*time.Minute).Should(Succeed())
+
+			By("allocating pods via BatchSandbox")
+			const batchSandboxName = "test-bs-eviction"
+			bsYAML, err := renderTemplate("testdata/batchsandbox-pooled-no-expire.yaml", map[string]interface{}{
+				"BatchSandboxName": batchSandboxName,
+				"Namespace":        testNamespace,
+				"Replicas":         2,
+				"PoolName":         poolName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			bsFile := filepath.Join("/tmp", batchSandboxName+".yaml")
+			err = os.WriteFile(bsFile, []byte(bsYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(bsFile)
+
+			cmd = exec.Command("kubectl", "apply", "-f", bsFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			var allocatedPods []string
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "batchsandbox", batchSandboxName, "-n", testNamespace,
+					"-o", "jsonpath={.metadata.annotations.sandbox\\.opensandbox\\.io/alloc-status}")
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).NotTo(BeEmpty())
+
+				var alloc struct {
+					Pods []string `json:"pods"`
+				}
+				err = json.Unmarshal([]byte(out), &alloc)
+				g.Expect(err).NotTo(HaveOccurred())
+				allocatedPods = alloc.Pods
+				g.Expect(allocatedPods).To(HaveLen(2))
+			}, 2*time.Minute).Should(Succeed())
+
+			By("marking all pool pods for eviction")
+			for _, pod := range allPoolPods {
+				cmd := exec.Command("kubectl", "label", "pod", pod, "-n", testNamespace,
+					"pool.opensandbox.io/evict=true", "--overwrite")
+				_, err := utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			By("verifying allocated pods are not deleted")
+			Consistently(func(g Gomega) {
+				for _, pod := range allocatedPods {
+					cmd := exec.Command("kubectl", "get", "pod", pod, "-n", testNamespace,
+						"-o", "jsonpath={.metadata.deletionTimestamp}")
+					output, err := utils.Run(cmd)
+					g.Expect(err).NotTo(HaveOccurred(), "allocated pod %s should still exist", pod)
+					g.Expect(output).To(BeEmpty(), "allocated pod %s should not be terminating", pod)
+				}
+			}, 30*time.Second, 3*time.Second).Should(Succeed())
+
+			By("cleaning up")
+			cmd = exec.Command("kubectl", "delete", "batchsandbox", batchSandboxName, "-n", testNamespace)
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "pool", poolName, "-n", testNamespace)
+			_, _ = utils.Run(cmd)
+		})
+
+		It("should evict idle pool pods", func() {
+			const poolName = "test-pool-eviction-b"
+			const testNamespace = "default"
+
+			By("creating a Pool")
+			poolYAML, err := renderTemplate("testdata/pool-basic.yaml", map[string]interface{}{
+				"PoolName":     poolName,
+				"SandboxImage": utils.SandboxImage,
+				"Namespace":    testNamespace,
+				"BufferMax":    3,
+				"BufferMin":    2,
+				"PoolMax":      5,
+				"PoolMin":      3,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			poolFile := filepath.Join("/tmp", poolName+".yaml")
+			err = os.WriteFile(poolFile, []byte(poolYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(poolFile)
+
+			cmd := exec.Command("kubectl", "apply", "-f", poolFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for pool to stabilise with idle pods")
+			var idlePods []string
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods", "-n", testNamespace,
+					"-l", fmt.Sprintf("sandbox.opensandbox.io/pool-name=%s", poolName),
+					"--field-selector=status.phase=Running",
+					"-o", "jsonpath={.items[*].metadata.name}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				idlePods = strings.Fields(output)
+				g.Expect(len(idlePods)).To(BeNumerically(">=", 2))
+			}, 3*time.Minute).Should(Succeed())
+
+			By("marking all pool pods for eviction")
+			for _, pod := range idlePods {
+				cmd := exec.Command("kubectl", "label", "pod", pod, "-n", testNamespace,
+					"pool.opensandbox.io/evict=true", "--overwrite")
+				_, err := utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			By("verifying all idle pods are eventually deleted")
+			Eventually(func(g Gomega) {
+				for _, pod := range idlePods {
+					cmd := exec.Command("kubectl", "get", "pod", pod, "-n", testNamespace,
+						"-o", "jsonpath={.metadata.deletionTimestamp}")
+					output, err := utils.Run(cmd)
+					if err != nil && strings.Contains(err.Error(), "not found") {
+						continue // already gone
+					}
+					g.Expect(err).NotTo(HaveOccurred())
+					g.Expect(output).NotTo(BeEmpty(), "idle pod %s should be terminating", pod)
+				}
+			}, 30*time.Second, 2*time.Second).Should(Succeed())
+
+			By("cleaning up")
+			cmd = exec.Command("kubectl", "delete", "pool", poolName, "-n", testNamespace)
+			_, _ = utils.Run(cmd)
+		})
+
+		It("should not allocate pods marked for eviction to a BatchSandbox", func() {
+			const poolName = "test-pool-eviction-c"
+			const testNamespace = "default"
+
+			By("creating a Pool")
+			poolYAML, err := renderTemplate("testdata/pool-basic.yaml", map[string]interface{}{
+				"PoolName":     poolName,
+				"SandboxImage": utils.SandboxImage,
+				"Namespace":    testNamespace,
+				"BufferMax":    4,
+				"BufferMin":    2,
+				"PoolMax":      6,
+				"PoolMin":      3,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			poolFile := filepath.Join("/tmp", poolName+".yaml")
+			err = os.WriteFile(poolFile, []byte(poolYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(poolFile)
+
+			cmd := exec.Command("kubectl", "apply", "-f", poolFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for Pool to replenish with fresh idle pods")
+			var freshPods []string
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods", "-n", testNamespace,
+					"-l", fmt.Sprintf("sandbox.opensandbox.io/pool-name=%s", poolName),
+					"--field-selector=status.phase=Running",
+					"-o", "jsonpath={.items[*].metadata.name}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				freshPods = strings.Fields(output)
+				g.Expect(len(freshPods)).To(BeNumerically(">=", 2))
+			}, 3*time.Minute).Should(Succeed())
+
+			By("marking all current idle pods for eviction before any BatchSandbox claims them")
+			for _, pod := range freshPods {
+				cmd := exec.Command("kubectl", "label", "pod", pod, "-n", testNamespace,
+					"pool.opensandbox.io/evict=true", "--overwrite")
+				_, err := utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred())
+			}
+			evictingPods := make(map[string]bool)
+			for _, pod := range freshPods {
+				evictingPods[pod] = true
+			}
+
+			By("creating a BatchSandbox that requests pods from the pool")
+			const batchSandboxName = "test-bs-eviction-c"
+			bsYAML, err := renderTemplate("testdata/batchsandbox-pooled-no-expire.yaml", map[string]interface{}{
+				"BatchSandboxName": batchSandboxName,
+				"Namespace":        testNamespace,
+				"Replicas":         1,
+				"PoolName":         poolName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			bsFile := filepath.Join("/tmp", batchSandboxName+".yaml")
+			err = os.WriteFile(bsFile, []byte(bsYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(bsFile)
+
+			cmd = exec.Command("kubectl", "apply", "-f", bsFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying BatchSandbox gets a pod that is NOT one of the evicting pods")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "batchsandbox", batchSandboxName, "-n", testNamespace,
+					"-o", "jsonpath={.metadata.annotations.sandbox\\.opensandbox\\.io/alloc-status}")
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).NotTo(BeEmpty())
+
+				var alloc struct {
+					Pods []string `json:"pods"`
+				}
+				err = json.Unmarshal([]byte(out), &alloc)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(alloc.Pods).To(HaveLen(1))
+				g.Expect(evictingPods).NotTo(HaveKey(alloc.Pods[0]),
+					"evicting pod %s should not be allocated", alloc.Pods[0])
+			}, 3*time.Minute).Should(Succeed())
+
+			By("cleaning up")
+			cmd = exec.Command("kubectl", "delete", "batchsandbox", batchSandboxName, "-n", testNamespace)
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "pool", poolName, "-n", testNamespace)
+			_, _ = utils.Run(cmd)
+		})
+
 		It("should correctly create pods and maintain pool status", func() {
 			const poolName = "test-pool-basic"
 			const testNamespace = "default"
@@ -1293,6 +1552,845 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 	})
 
+	Context("Pool Update", func() {
+		BeforeAll(func() {
+			By("waiting for controller to be ready")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
+					"-n", namespace, "-o", "jsonpath={.items[0].status.phase}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("Running"))
+			}, 2*time.Minute).Should(Succeed())
+		})
+
+		It("should perform rolling update with maxUnavailable constraint", func() {
+			const poolName = "test-pool-rolling-update"
+			const testNamespace = "default"
+			const poolSize = 10
+			const maxUnavailablePercent = "20%"
+
+			By("creating a Pool with updateStrategy")
+			poolYAML, err := renderTemplate("testdata/pool-with-update-strategy.yaml", map[string]interface{}{
+				"PoolName":       poolName,
+				"SandboxImage":   utils.SandboxImage,
+				"Namespace":      testNamespace,
+				"BufferMax":      poolSize,
+				"BufferMin":      poolSize - 2,
+				"PoolMax":        poolSize,
+				"PoolMin":        poolSize,
+				"MaxUnavailable": maxUnavailablePercent,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			poolFile := filepath.Join("/tmp", poolName+".yaml")
+			err = os.WriteFile(poolFile, []byte(poolYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(poolFile)
+
+			cmd := exec.Command("kubectl", "apply", "-f", poolFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for Pool to have all pods running")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pool", poolName, "-n", testNamespace,
+					"-o", "jsonpath={.status.total}")
+				totalStr, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				total := 0
+				fmt.Sscanf(totalStr, "%d", &total)
+				g.Expect(total).To(Equal(poolSize))
+
+				cmd = exec.Command("kubectl", "get", "pods", "-n", testNamespace,
+					"-l", fmt.Sprintf("sandbox.opensandbox.io/pool-name=%s", poolName),
+					"--field-selector=status.phase=Running",
+					"-o", "jsonpath={.items[*].metadata.name}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(len(strings.Fields(output))).To(Equal(poolSize))
+			}, 3*time.Minute).Should(Succeed())
+
+			By("allocating some pods via BatchSandbox")
+			const batchSandboxName = "test-bs-rolling-update"
+			bsYAML, err := renderTemplate("testdata/batchsandbox-pooled-no-expire.yaml", map[string]interface{}{
+				"BatchSandboxName": batchSandboxName,
+				"Namespace":        testNamespace,
+				"Replicas":         3,
+				"PoolName":         poolName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			bsFile := filepath.Join("/tmp", batchSandboxName+".yaml")
+			err = os.WriteFile(bsFile, []byte(bsYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(bsFile)
+
+			cmd = exec.Command("kubectl", "apply", "-f", bsFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			var allocatedPods []string
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "batchsandbox", batchSandboxName, "-n", testNamespace,
+					"-o", "jsonpath={.metadata.annotations.sandbox\\.opensandbox\\.io/alloc-status}")
+				out, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(out).NotTo(BeEmpty())
+
+				var alloc struct {
+					Pods []string `json:"pods"`
+				}
+				err = json.Unmarshal([]byte(out), &alloc)
+				g.Expect(err).NotTo(HaveOccurred())
+				allocatedPods = alloc.Pods
+				g.Expect(allocatedPods).To(HaveLen(3))
+			}, 2*time.Minute).Should(Succeed())
+
+			By("recording initial revision from pool status")
+			cmd = exec.Command("kubectl", "get", "pool", poolName, "-n", testNamespace,
+				"-o", "jsonpath={.status.revision}")
+			initialRevision, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("triggering pool update by changing template")
+			updatedPoolYAML, err := renderTemplate("testdata/pool-with-update-strategy.yaml", map[string]interface{}{
+				"PoolName":       poolName,
+				"SandboxImage":   utils.SandboxImage,
+				"Namespace":      testNamespace,
+				"BufferMax":      poolSize,
+				"BufferMin":      poolSize - 2,
+				"PoolMax":        poolSize,
+				"PoolMin":        poolSize,
+				"MaxUnavailable": maxUnavailablePercent,
+				"EnvValue":       "v2",
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			updatedPoolWithEnv := strings.Replace(updatedPoolYAML, "command: [\"sleep\", \"3600\"]",
+				"command: [\"sleep\", \"3600\"]\n        env:\n        - name: VERSION\n          value: \"v2\"", 1)
+			err = os.WriteFile(poolFile, []byte(updatedPoolWithEnv), 0644)
+			Expect(err).NotTo(HaveOccurred())
+
+			cmd = exec.Command("kubectl", "apply", "-f", poolFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying allocated pods are not deleted during upgrade")
+			Consistently(func(g Gomega) {
+				for _, pod := range allocatedPods {
+					cmd := exec.Command("kubectl", "get", "pod", pod, "-n", testNamespace,
+						"-o", "jsonpath={.metadata.deletionTimestamp}")
+					output, err := utils.Run(cmd)
+					g.Expect(err).NotTo(HaveOccurred(), "allocated pod %s should still exist", pod)
+					g.Expect(output).To(BeEmpty(), "allocated pod %s should not be terminating", pod)
+				}
+			}, 60*time.Second, 5*time.Second).Should(Succeed())
+
+			By("verifying new BatchSandbox can be allocated during upgrade")
+			const newBatchSandboxName = "test-bs-rolling-update-new"
+			newBSYAML, err := renderTemplate("testdata/batchsandbox-pooled-no-expire.yaml", map[string]interface{}{
+				"BatchSandboxName": newBatchSandboxName,
+				"Namespace":        testNamespace,
+				"Replicas":         1,
+				"PoolName":         poolName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			newBSFile := filepath.Join("/tmp", newBatchSandboxName+".yaml")
+			err = os.WriteFile(newBSFile, []byte(newBSYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(newBSFile)
+
+			cmd = exec.Command("kubectl", "apply", "-f", newBSFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "batchsandbox", newBatchSandboxName, "-n", testNamespace,
+					"-o", "jsonpath={.status.allocated}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1"))
+			}, 2*time.Minute).Should(Succeed())
+
+			By("verifying maxUnavailable constraint during upgrade")
+			maxUnavailable := int(float64(poolSize) * 0.2)
+			if maxUnavailable < 1 {
+				maxUnavailable = 1
+			}
+
+			// Check a few times that unavailable pods don't exceed maxUnavailable
+			for i := 0; i < 5; i++ {
+				cmd := exec.Command("kubectl", "get", "pods", "-n", testNamespace,
+					"-l", fmt.Sprintf("sandbox.opensandbox.io/pool-name=%s", poolName),
+					"-o", "json")
+				output, err := utils.Run(cmd)
+				Expect(err).NotTo(HaveOccurred())
+
+				var podList struct {
+					Items []struct {
+						Status struct {
+							Phase      string `json:"phase"`
+							Conditions []struct {
+								Type   string `json:"type"`
+								Status string `json:"status"`
+							} `json:"conditions"`
+						} `json:"status"`
+					} `json:"items"`
+				}
+				err = json.Unmarshal([]byte(output), &podList)
+				Expect(err).NotTo(HaveOccurred())
+
+				unavailableCount := 0
+				for _, pod := range podList.Items {
+					if pod.Status.Phase != "Running" {
+						unavailableCount++
+						continue
+					}
+					ready := false
+					for _, cond := range pod.Status.Conditions {
+						if cond.Type == "Ready" && cond.Status == "True" {
+							ready = true
+							break
+						}
+					}
+					if !ready {
+						unavailableCount++
+					}
+				}
+				Expect(unavailableCount).To(BeNumerically("<=", maxUnavailable+1),
+					"unavailable pods should not exceed maxUnavailable + 1 (allowing for timing)")
+				time.Sleep(2 * time.Second)
+			}
+
+			By("verifying pool status reflects upgrade progress")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pool", poolName, "-n", testNamespace,
+					"-o", "jsonpath={.status.updated}")
+				updatedStr, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				updated := 0
+				if updatedStr != "" {
+					fmt.Sscanf(updatedStr, "%d", &updated)
+				}
+				// At least some pods should be updated
+				g.Expect(updated).To(BeNumerically(">", 0), "some pods should be updated")
+
+				// Revision should be different from initial
+				cmd = exec.Command("kubectl", "get", "pool", poolName, "-n", testNamespace,
+					"-o", "jsonpath={.status.revision}")
+				currentRevision, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(currentRevision).NotTo(Equal(initialRevision))
+			}, 2*time.Minute).Should(Succeed())
+
+			By("releasing BatchSandbox to allow full upgrade")
+			cmd = exec.Command("kubectl", "delete", "batchsandbox", batchSandboxName, "-n", testNamespace)
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "batchsandbox", newBatchSandboxName, "-n", testNamespace)
+			_, _ = utils.Run(cmd)
+
+			By("verifying pool eventually completes upgrade")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pool", poolName, "-n", testNamespace,
+					"-o", "jsonpath={.status.updated}")
+				updatedStr, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				updated := 0
+				if updatedStr != "" {
+					fmt.Sscanf(updatedStr, "%d", &updated)
+				}
+				g.Expect(updated).To(Equal(poolSize), "all pods should be updated")
+			}, 3*time.Minute).Should(Succeed())
+
+			By("cleaning up")
+			cmd = exec.Command("kubectl", "delete", "pool", poolName, "-n", testNamespace)
+			_, _ = utils.Run(cmd)
+		})
+	})
+
+	Context("Pool State Recovery", func() {
+		BeforeAll(func() {
+			By("waiting for controller to be ready")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
+					"-n", namespace, "-o", "jsonpath={.items[0].status.phase}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("Running"))
+			}, 2*time.Minute).Should(Succeed())
+		})
+
+		It("should reconstruct pool allocation state after controller restart", func() {
+			const poolName = "test-pool-recovery"
+			const batchSandboxName = "test-bs-recovery"
+			const testNamespace = "default"
+			const replicas = 2
+
+			By("creating a Pool")
+			poolYAML, err := renderTemplate("testdata/pool-basic.yaml", map[string]interface{}{
+				"PoolName":     poolName,
+				"SandboxImage": utils.SandboxImage,
+				"Namespace":    testNamespace,
+				"BufferMax":    3,
+				"BufferMin":    2,
+				"PoolMax":      5,
+				"PoolMin":      2,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			poolFile := filepath.Join("/tmp", "test-pool-recovery.yaml")
+			err = os.WriteFile(poolFile, []byte(poolYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(poolFile)
+
+			cmd := exec.Command("kubectl", "apply", "-f", poolFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for Pool to be ready")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pool", poolName, "-n", testNamespace,
+					"-o", "jsonpath={.status.total}")
+				totalStr, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(totalStr).NotTo(BeEmpty())
+			}, 2*time.Minute).Should(Succeed())
+
+			By("creating a BatchSandbox that allocates from the pool")
+			bsYAML, err := renderTemplate("testdata/batchsandbox-pooled-no-expire.yaml", map[string]interface{}{
+				"BatchSandboxName": batchSandboxName,
+				"Namespace":        testNamespace,
+				"Replicas":         replicas,
+				"PoolName":         poolName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			bsFile := filepath.Join("/tmp", "test-bs-recovery.yaml")
+			err = os.WriteFile(bsFile, []byte(bsYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(bsFile)
+
+			cmd = exec.Command("kubectl", "apply", "-f", bsFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for BatchSandbox to allocate pods")
+			var poolAllocatedBefore string
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "batchsandbox", batchSandboxName, "-n", testNamespace,
+					"-o", "jsonpath={.status.allocated}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal(fmt.Sprintf("%d", replicas)))
+
+				cmd = exec.Command("kubectl", "get", "pool", poolName, "-n", testNamespace,
+					"-o", "jsonpath={.status.allocated}")
+				poolAllocatedBefore, _ = utils.Run(cmd)
+			}, 2*time.Minute).Should(Succeed())
+
+			By("recording Pool available count before restart")
+			cmd = exec.Command("kubectl", "get", "pool", poolName, "-n", testNamespace,
+				"-o", "jsonpath={.status.available}")
+			poolAvailableBefore, _ := utils.Run(cmd)
+
+			By("restarting the controller")
+			err = restartController()
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying Pool allocation state is reconstructed after restart")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pool", poolName, "-n", testNamespace,
+					"-o", "jsonpath={.status.allocated}")
+				poolAllocatedAfter, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(poolAllocatedAfter).To(Equal(poolAllocatedBefore))
+
+				cmd = exec.Command("kubectl", "get", "pool", poolName, "-n", testNamespace,
+					"-o", "jsonpath={.status.available}")
+				poolAvailableAfter, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(poolAvailableAfter).To(Equal(poolAvailableBefore))
+			}, 30*time.Second).Should(Succeed())
+
+			By("creating new BatchSandbox to verify no duplicate allocation occurs")
+			const newBatchSandboxName = "test-bs-recovery-new"
+			newBSYAML, err := renderTemplate("testdata/batchsandbox-pooled-no-expire.yaml", map[string]interface{}{
+				"BatchSandboxName": newBatchSandboxName,
+				"Namespace":        testNamespace,
+				"Replicas":         1,
+				"PoolName":         poolName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			newBSFile := filepath.Join("/tmp", "test-bs-recovery-new.yaml")
+			err = os.WriteFile(newBSFile, []byte(newBSYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(newBSFile)
+
+			cmd = exec.Command("kubectl", "apply", "-f", newBSFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying new BatchSandbox gets allocated and Pool.allocated increases correctly")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "batchsandbox", newBatchSandboxName, "-n", testNamespace,
+					"-o", "jsonpath={.status.allocated}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1"))
+
+				cmd = exec.Command("kubectl", "get", "pool", poolName, "-n", testNamespace,
+					"-o", "jsonpath={.status.allocated}")
+				poolAllocatedNew, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+
+				before := 0
+				if poolAllocatedBefore != "" {
+					fmt.Sscanf(poolAllocatedBefore, "%d", &before)
+				}
+				after := 0
+				if poolAllocatedNew != "" {
+					fmt.Sscanf(poolAllocatedNew, "%d", &after)
+				}
+				g.Expect(after).To(Equal(before+1), "Pool.allocated should increase by 1")
+			}, 2*time.Minute).Should(Succeed())
+
+			By("cleaning up resources")
+			cmd = exec.Command("kubectl", "delete", "batchsandbox", batchSandboxName, "-n", testNamespace)
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "batchsandbox", newBatchSandboxName, "-n", testNamespace)
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "pool", poolName, "-n", testNamespace)
+			_, _ = utils.Run(cmd)
+		})
+
+		It("should reconstruct allocation for multiple batchsandboxes after restart", func() {
+			const poolName = "test-pool-multi-bs"
+			const bs1Name = "test-bs-1"
+			const bs2Name = "test-bs-2"
+			const testNamespace = "default"
+
+			By("creating a Pool")
+			poolYAML, err := renderTemplate("testdata/pool-basic.yaml", map[string]interface{}{
+				"PoolName":     poolName,
+				"SandboxImage": utils.SandboxImage,
+				"Namespace":    testNamespace,
+				"BufferMax":    5,
+				"BufferMin":    3,
+				"PoolMax":      10,
+				"PoolMin":      5,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			poolFile := filepath.Join("/tmp", "test-pool-multi.yaml")
+			err = os.WriteFile(poolFile, []byte(poolYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(poolFile)
+
+			cmd := exec.Command("kubectl", "apply", "-f", poolFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for Pool to be ready")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pool", poolName, "-n", testNamespace,
+					"-o", "jsonpath={.status.total}")
+				totalStr, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(totalStr).NotTo(BeEmpty())
+			}, 2*time.Minute).Should(Succeed())
+
+			By("creating two BatchSandboxes")
+			bs1YAML, err := renderTemplate("testdata/batchsandbox-pooled-no-expire.yaml", map[string]interface{}{
+				"BatchSandboxName": bs1Name,
+				"Namespace":        testNamespace,
+				"Replicas":         2,
+				"PoolName":         poolName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			bs1File := filepath.Join("/tmp", "test-bs1.yaml")
+			err = os.WriteFile(bs1File, []byte(bs1YAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(bs1File)
+
+			bs2YAML, err := renderTemplate("testdata/batchsandbox-pooled-no-expire.yaml", map[string]interface{}{
+				"BatchSandboxName": bs2Name,
+				"Namespace":        testNamespace,
+				"Replicas":         3,
+				"PoolName":         poolName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			bs2File := filepath.Join("/tmp", "test-bs2.yaml")
+			err = os.WriteFile(bs2File, []byte(bs2YAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(bs2File)
+
+			cmd = exec.Command("kubectl", "apply", "-f", bs1File)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			cmd = exec.Command("kubectl", "apply", "-f", bs2File)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for allocations to complete")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "batchsandbox", bs1Name, "-n", testNamespace,
+					"-o", "jsonpath={.status.allocated}")
+				output1, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output1).To(Equal("2"))
+
+				cmd = exec.Command("kubectl", "get", "batchsandbox", bs2Name, "-n", testNamespace,
+					"-o", "jsonpath={.status.allocated}")
+				output2, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output2).To(Equal("3"))
+
+				cmd = exec.Command("kubectl", "get", "pool", poolName, "-n", testNamespace,
+					"-o", "jsonpath={.status.allocated}")
+				allocatedStr, _ := utils.Run(cmd)
+				allocated := 0
+				fmt.Sscanf(allocatedStr, "%d", &allocated)
+				g.Expect(allocated).To(Equal(5))
+			}, 2*time.Minute).Should(Succeed())
+
+			By("restarting the controller")
+			err = restartController()
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying Pool allocation state is correctly reconstructed")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pool", poolName, "-n", testNamespace,
+					"-o", "jsonpath={.status.allocated}")
+				allocatedStr, _ := utils.Run(cmd)
+				allocated := 0
+				fmt.Sscanf(allocatedStr, "%d", &allocated)
+				g.Expect(allocated).To(Equal(5))
+
+				cmd = exec.Command("kubectl", "get", "batchsandbox", bs1Name, "-n", testNamespace,
+					"-o", "jsonpath={.status.allocated}")
+				output1, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output1).To(Equal("2"))
+
+				cmd = exec.Command("kubectl", "get", "batchsandbox", bs2Name, "-n", testNamespace,
+					"-o", "jsonpath={.status.allocated}")
+				output2, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output2).To(Equal("3"))
+			}, 30*time.Second).Should(Succeed())
+
+			By("deleting first BatchSandbox and verifying only its pods are returned")
+			cmd = exec.Command("kubectl", "delete", "batchsandbox", bs1Name, "-n", testNamespace)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pool", poolName, "-n", testNamespace,
+					"-o", "jsonpath={.status.allocated}")
+				allocatedStr, _ := utils.Run(cmd)
+				allocated := 0
+				fmt.Sscanf(allocatedStr, "%d", &allocated)
+				g.Expect(allocated).To(Equal(3))
+			}, 30*time.Second).Should(Succeed())
+
+			By("cleaning up")
+			cmd = exec.Command("kubectl", "delete", "batchsandbox", bs2Name, "-n", testNamespace)
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "pool", poolName, "-n", testNamespace)
+			_, _ = utils.Run(cmd)
+		})
+
+		It("should handle released pods correctly after controller restart", func() {
+			const poolName = "test-pool-release"
+			const batchSandboxName = "test-bs-release"
+			const testNamespace = "default"
+
+			By("creating a Pool")
+			poolYAML, err := renderTemplate("testdata/pool-basic.yaml", map[string]interface{}{
+				"PoolName":     poolName,
+				"SandboxImage": utils.SandboxImage,
+				"Namespace":    testNamespace,
+				"BufferMax":    5,
+				"BufferMin":    3,
+				"PoolMax":      10,
+				"PoolMin":      5,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			poolFile := filepath.Join("/tmp", "test-pool-release.yaml")
+			err = os.WriteFile(poolFile, []byte(poolYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(poolFile)
+
+			cmd := exec.Command("kubectl", "apply", "-f", poolFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for Pool to be ready")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pool", poolName, "-n", testNamespace,
+					"-o", "jsonpath={.status.total}")
+				totalStr, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(totalStr).NotTo(BeEmpty())
+			}, 2*time.Minute).Should(Succeed())
+
+			By("creating a BatchSandbox with replicas=3")
+			bsYAML, err := renderTemplate("testdata/batchsandbox-pooled-no-expire.yaml", map[string]interface{}{
+				"BatchSandboxName": batchSandboxName,
+				"Namespace":        testNamespace,
+				"Replicas":         3,
+				"PoolName":         poolName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			bsFile := filepath.Join("/tmp", "test-bs-release.yaml")
+			err = os.WriteFile(bsFile, []byte(bsYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(bsFile)
+
+			cmd = exec.Command("kubectl", "apply", "-f", bsFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for allocation")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pool", poolName, "-n", testNamespace,
+					"-o", "jsonpath={.status.allocated}")
+				allocatedStr, _ := utils.Run(cmd)
+				allocated := 0
+				fmt.Sscanf(allocatedStr, "%d", &allocated)
+				g.Expect(allocated).To(Equal(3))
+			}, 2*time.Minute).Should(Succeed())
+
+			By("deleting BatchSandbox to release pods")
+			cmd = exec.Command("kubectl", "delete", "batchsandbox", batchSandboxName, "-n", testNamespace)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for pods to be released")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pool", poolName, "-n", testNamespace,
+					"-o", "jsonpath={.status.allocated}")
+				allocatedStr, _ := utils.Run(cmd)
+				allocated := 0
+				fmt.Sscanf(allocatedStr, "%d", &allocated)
+				g.Expect(allocated).To(Equal(0))
+			}, 30*time.Second).Should(Succeed())
+
+			By("restarting the controller after pods are released")
+			err = restartController()
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying released pods are not re-allocated")
+			Consistently(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pool", poolName, "-n", testNamespace,
+					"-o", "jsonpath={.status.allocated}")
+				allocatedStr, _ := utils.Run(cmd)
+				allocated := 0
+				fmt.Sscanf(allocatedStr, "%d", &allocated)
+				g.Expect(allocated).To(Equal(0))
+			}, 10*time.Second, 2*time.Second).Should(Succeed())
+
+			By("creating new BatchSandbox to verify it gets fresh pods")
+			const newBatchSandboxName = "test-bs-release-new"
+			newBSYAML, err := renderTemplate("testdata/batchsandbox-pooled-no-expire.yaml", map[string]interface{}{
+				"BatchSandboxName": newBatchSandboxName,
+				"Namespace":        testNamespace,
+				"Replicas":         2,
+				"PoolName":         poolName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			newBSFile := filepath.Join("/tmp", "test-bs-release-new.yaml")
+			err = os.WriteFile(newBSFile, []byte(newBSYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(newBSFile)
+
+			cmd = exec.Command("kubectl", "apply", "-f", newBSFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying new BatchSandbox gets allocated correctly")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "batchsandbox", newBatchSandboxName, "-n", testNamespace,
+					"-o", "jsonpath={.status.allocated}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("2"))
+
+				cmd = exec.Command("kubectl", "get", "pool", poolName, "-n", testNamespace,
+					"-o", "jsonpath={.status.allocated}")
+				allocatedStr, _ := utils.Run(cmd)
+				allocated := 0
+				fmt.Sscanf(allocatedStr, "%d", &allocated)
+				g.Expect(allocated).To(Equal(2))
+			}, 2*time.Minute).Should(Succeed())
+
+			By("cleaning up")
+			cmd = exec.Command("kubectl", "delete", "batchsandbox", newBatchSandboxName, "-n", testNamespace)
+			_, _ = utils.Run(cmd)
+			cmd = exec.Command("kubectl", "delete", "pool", poolName, "-n", testNamespace)
+			_, _ = utils.Run(cmd)
+		})
+
+		It("should panic and exit when Recover fails due to malformed annotation", func() {
+			const poolName = "test-pool-recover-fail"
+			const batchSandboxName = "test-bs-malformed"
+			const testNamespace = "default"
+
+			By("first stopping controller to prevent early sync.Once execution")
+			cmd := exec.Command("kubectl", "scale", "deployment", "opensandbox-controller-manager",
+				"--replicas=0", "-n", namespace)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for controller pod to terminate")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
+					"-n", namespace, "-o", "jsonpath={.items[*].metadata.name}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).ShouldNot(HaveOccurred())
+				g.Expect(strings.TrimSpace(output)).To(BeEmpty())
+			}, 30*time.Second, 2*time.Second).Should(Succeed())
+
+			By("creating a Pool (while controller is stopped)")
+			poolYAML, err := renderTemplate("testdata/pool-basic.yaml", map[string]interface{}{
+				"PoolName":     poolName,
+				"SandboxImage": utils.SandboxImage,
+				"Namespace":    testNamespace,
+				"BufferMax":    3,
+				"BufferMin":    2,
+				"PoolMax":      5,
+				"PoolMin":      2,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			poolFile := filepath.Join("/tmp", "test-pool-recover-fail.yaml")
+			err = os.WriteFile(poolFile, []byte(poolYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(poolFile)
+
+			cmd = exec.Command("kubectl", "apply", "-f", poolFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating a BatchSandbox with malformed alloc-status annotation (while controller is stopped)")
+			bsYAML, err := renderTemplate("testdata/batchsandbox-malformed-annotation.yaml", map[string]interface{}{
+				"BatchSandboxName": batchSandboxName,
+				"Namespace":        testNamespace,
+				"Replicas":         1,
+				"PoolName":         poolName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			bsFile := filepath.Join("/tmp", "test-bs-malformed.yaml")
+			err = os.WriteFile(bsFile, []byte(bsYAML), 0644)
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(bsFile)
+
+			cmd = exec.Command("kubectl", "apply", "-f", bsFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying malformed annotation is set correctly")
+			cmd = exec.Command("kubectl", "get", "batchsandbox", batchSandboxName, "-n", testNamespace,
+				"-o", "jsonpath={.metadata.annotations.sandbox\\.opensandbox\\.io/alloc-status}")
+			annoOutput, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(annoOutput).To(ContainSubstring("invalid json"), "BatchSandbox should have malformed annotation")
+
+			By("verifying BatchSandbox has poolRef set")
+			cmd = exec.Command("kubectl", "get", "batchsandbox", batchSandboxName, "-n", testNamespace,
+				"-o", "jsonpath={.spec.poolRef}")
+			poolRefOutput, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(poolRefOutput).To(Equal(poolName), "BatchSandbox should have poolRef set to %s", poolName)
+
+			By("scaling up controller-manager - should exit due to malformed annotation during Recover")
+			cmd = exec.Command("kubectl", "scale", "deployment", "opensandbox-controller-manager",
+				"--replicas=1", "-n", namespace)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for controller to process Pool, attempt Recover, and exit")
+			// Wait long enough for:
+			// 1. Container to start
+			// 2. Leader election to complete
+			// 3. Pool controller to reconcile and call Schedule -> checkRecovery -> Recover
+			// 4. Recover to fail and call os.Exit(1)
+			// 5. Container to restart
+			time.Sleep(60 * time.Second)
+
+			By("verifying container restarted and exited with code 1")
+			// Get pod status to check restartCount and exit code
+			cmd = exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
+				"-n", namespace, "-o", "json")
+			podJSON, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			var podList struct {
+				Items []struct {
+					Status struct {
+						ContainerStatuses []struct {
+							RestartCount int `json:"restartCount"`
+							LastState    struct {
+								Terminated *struct {
+									ExitCode int    `json:"exitCode"`
+									Reason   string `json:"reason"`
+								} `json:"terminated"`
+							} `json:"lastState"`
+							State struct {
+								Waiting *struct {
+									Reason  string `json:"reason"`
+									Message string `json:"message"`
+								} `json:"waiting"`
+							} `json:"state"`
+						} `json:"containerStatuses"`
+					} `json:"status"`
+				} `json:"items"`
+			}
+			err = json.Unmarshal([]byte(podJSON), &podList)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(len(podList.Items)).To(BeNumerically(">", 0), "Should have at least one controller pod")
+
+			// Find a container that has restarted
+			foundRestarted := false
+			for _, pod := range podList.Items {
+				for _, container := range pod.Status.ContainerStatuses {
+					if container.RestartCount > 0 {
+						foundRestarted = true
+						// Verify the last termination had exit code 1
+						if container.LastState.Terminated != nil {
+							Expect(container.LastState.Terminated.ExitCode).To(Equal(1),
+								"Container should exit with code 1 due to Recover failure")
+						}
+						break
+					}
+				}
+				if foundRestarted {
+					break
+				}
+			}
+			Expect(foundRestarted).To(BeTrue(), "Container should have restarted due to Recover failure")
+
+			By("cleaning up - deleting malformed BatchSandbox first")
+			cmd = exec.Command("kubectl", "delete", "batchsandbox", batchSandboxName, "-n", testNamespace)
+			_, _ = utils.Run(cmd)
+
+			By("restarting controller after cleanup - should succeed now")
+			err = restartController()
+			Expect(err).NotTo(HaveOccurred())
+
+			By("cleaning up pool")
+			cmd = exec.Command("kubectl", "delete", "pool", poolName, "-n", testNamespace)
+			_, _ = utils.Run(cmd)
+		})
+	})
+
 })
 
 // renderTemplate renders a YAML template file with the given data.
@@ -1320,4 +2418,45 @@ func renderTemplate(templateFile string, data map[string]interface{}) (string, e
 	}
 
 	return buf.String(), nil
+}
+
+// restartController scales down the controller-manager deployment to 0 and back to 1,
+// simulating a controller restart to test state reconstruction.
+func restartController() error {
+	By("scaling down controller-manager to simulate restart")
+	cmd := exec.Command("kubectl", "scale", "deployment", "opensandbox-controller-manager",
+		"--replicas=0", "-n", namespace)
+	_, err := utils.Run(cmd)
+	if err != nil {
+		return fmt.Errorf("failed to scale down controller: %w", err)
+	}
+
+	By("waiting for controller pod to terminate")
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
+			"-n", namespace, "-o", "jsonpath={.items[*].metadata.name}")
+		output, err := utils.Run(cmd)
+		// Pod list should be empty when all pods are terminated
+		g.Expect(err).ShouldNot(HaveOccurred())
+		g.Expect(strings.TrimSpace(output)).To(BeEmpty())
+	}, 30*time.Second, 2*time.Second).Should(Succeed())
+
+	By("scaling up controller-manager")
+	cmd = exec.Command("kubectl", "scale", "deployment", "opensandbox-controller-manager",
+		"--replicas=1", "-n", namespace)
+	_, err = utils.Run(cmd)
+	if err != nil {
+		return fmt.Errorf("failed to scale up controller: %w", err)
+	}
+
+	By("waiting for controller to be ready after restart")
+	Eventually(func(g Gomega) {
+		cmd := exec.Command("kubectl", "get", "pods", "-l", "control-plane=controller-manager",
+			"-n", namespace, "-o", "jsonpath={.items[0].status.phase}")
+		output, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(output).To(Equal("Running"))
+	}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+	return nil
 }

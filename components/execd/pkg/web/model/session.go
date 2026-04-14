@@ -16,6 +16,8 @@ package model
 
 import (
 	"github.com/go-playground/validator/v10"
+
+	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 )
 
 // CreateSessionRequest is the request body for creating a bash session.
@@ -28,15 +30,18 @@ type CreateSessionResponse struct {
 	SessionID string `json:"session_id"`
 }
 
-// RunInSessionRequest is the request body for running code in an existing session.
+// RunInSessionRequest is the request body for running a command in an existing session.
 type RunInSessionRequest struct {
-	Code      string `json:"code" validate:"required"`
-	Cwd       string `json:"cwd,omitempty"`
-	TimeoutMs int64  `json:"timeout_ms,omitempty" validate:"omitempty,gte=0"`
+	Command string `json:"command" validate:"required"`
+	Cwd     string `json:"cwd,omitempty"`
+	Timeout int64  `json:"timeout,omitempty" validate:"omitempty,gte=0"`
 }
 
 // Validate validates RunInSessionRequest.
 func (r *RunInSessionRequest) Validate() error {
 	validate := validator.New()
-	return validate.Struct(r)
+	if err := validate.Struct(r); err != nil {
+		return err
+	}
+	return runtime.ValidateWorkingDir(r.Cwd)
 }

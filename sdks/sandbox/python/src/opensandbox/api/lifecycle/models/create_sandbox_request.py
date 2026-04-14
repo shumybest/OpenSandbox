@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from ..models.create_sandbox_request_metadata import CreateSandboxRequestMetadata
     from ..models.image_spec import ImageSpec
     from ..models.network_policy import NetworkPolicy
+    from ..models.platform_spec import PlatformSpec
     from ..models.resource_limits import ResourceLimits
     from ..models.volume import Volume
 
@@ -69,12 +70,21 @@ class CreateSandboxRequest:
                 - ["java", "-jar", "/app/app.jar"]
                 - ["node", "server.js"]
                  Example: ['python', '/app/main.py'].
+            platform (PlatformSpec | Unset): Runtime platform constraint used for scheduling/provisioning.
+
+                This field is independent from `image` and expresses the expected target
+                OS and CPU architecture for sandbox execution.
+
+                Behavioral notes:
+                - If omitted, runtime uses existing default behavior (backward compatible).
+                - If provided and cannot be satisfied by runtime/template/pool constraints,
+                  request must fail explicitly.
             timeout (int | None | Unset): Sandbox timeout in seconds. The sandbox will automatically terminate after this
                 duration.
                 The maximum is controlled by the server configuration (`server.max_sandbox_timeout_seconds`).
-                Omit or set null to disable automatic expiration and require explicit cleanup.
+                Omit this field or set it to null to disable automatic expiration and require explicit cleanup.
                 Note: manual cleanup support is runtime-dependent; Kubernetes providers may reject
-                null timeout when the underlying workload provider does not support non-expiring sandboxes.
+                omitted or null timeout when the underlying workload provider does not support non-expiring sandboxes.
             env (CreateSandboxRequestEnv | Unset): Environment variables to inject into the sandbox runtime. Example:
                 {'API_KEY': 'secret-key', 'DEBUG': 'true', 'LOG_LEVEL': 'info'}.
             metadata (CreateSandboxRequestMetadata | Unset): Custom key-value metadata for management, filtering, and
@@ -98,11 +108,18 @@ class CreateSandboxRequest:
                 **Best Practices**:
                 - **Namespacing**: Use prefixed keys (e.g., `storage.id`) to prevent collisions.
                 - **Pass-through**: SDKs and middleware must treat this object as opaque and pass it through transparently.
+
+                **Well-known keys**:
+                - `access.renew.extend.seconds` (optional): Decimal integer string from **300** to **86400** (5 minutes to 24
+                hours inclusive). Opts the sandbox into OSEP-0009 renew-on-access and sets per-renewal extension seconds. Omit
+                to disable. Invalid values are rejected at creation with HTTP 400 (validated on the lifecycle create endpoint
+                via `validate_extensions` in server `src/extensions/validation.py`).
     """
 
     image: ImageSpec
     resource_limits: ResourceLimits
     entrypoint: list[str]
+    platform: PlatformSpec | Unset = UNSET
     timeout: int | None | Unset = UNSET
     env: CreateSandboxRequestEnv | Unset = UNSET
     metadata: CreateSandboxRequestMetadata | Unset = UNSET
@@ -117,6 +134,10 @@ class CreateSandboxRequest:
         resource_limits = self.resource_limits.to_dict()
 
         entrypoint = self.entrypoint
+
+        platform: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.platform, Unset):
+            platform = self.platform.to_dict()
 
         timeout: int | None | Unset
         if isinstance(self.timeout, Unset):
@@ -156,6 +177,8 @@ class CreateSandboxRequest:
                 "entrypoint": entrypoint,
             }
         )
+        if platform is not UNSET:
+            field_dict["platform"] = platform
         if timeout is not UNSET:
             field_dict["timeout"] = timeout
         if env is not UNSET:
@@ -178,6 +201,7 @@ class CreateSandboxRequest:
         from ..models.create_sandbox_request_metadata import CreateSandboxRequestMetadata
         from ..models.image_spec import ImageSpec
         from ..models.network_policy import NetworkPolicy
+        from ..models.platform_spec import PlatformSpec
         from ..models.resource_limits import ResourceLimits
         from ..models.volume import Volume
 
@@ -187,6 +211,13 @@ class CreateSandboxRequest:
         resource_limits = ResourceLimits.from_dict(d.pop("resourceLimits"))
 
         entrypoint = cast(list[str], d.pop("entrypoint"))
+
+        _platform = d.pop("platform", UNSET)
+        platform: PlatformSpec | Unset
+        if isinstance(_platform, Unset):
+            platform = UNSET
+        else:
+            platform = PlatformSpec.from_dict(_platform)
 
         def _parse_timeout(data: object) -> int | None | Unset:
             if data is None:
@@ -238,6 +269,7 @@ class CreateSandboxRequest:
             image=image,
             resource_limits=resource_limits,
             entrypoint=entrypoint,
+            platform=platform,
             timeout=timeout,
             env=env,
             metadata=metadata,

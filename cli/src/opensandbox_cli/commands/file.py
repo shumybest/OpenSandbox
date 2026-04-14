@@ -22,7 +22,17 @@ from pathlib import Path
 import click
 
 from opensandbox_cli.client import ClientContext
-from opensandbox_cli.utils import handle_errors
+from opensandbox_cli.utils import handle_errors, output_option, prepare_output
+
+
+def _parse_permission_mode(mode: str) -> int:
+    """Parse a permission mode string like 644 or 755."""
+    try:
+        return int(mode)
+    except ValueError as exc:
+        raise click.BadParameter(
+            f"Invalid permission mode '{mode}'. Use a permission value like 644 or 755."
+        ) from exc
 
 
 @click.group("file", invoke_without_command=True)
@@ -39,10 +49,18 @@ def file_group(ctx: click.Context) -> None:
 @click.argument("sandbox_id")
 @click.argument("path")
 @click.option("--encoding", default="utf-8", help="File encoding.")
+@output_option("raw", help_text="Output format: raw.")
 @click.pass_obj
 @handle_errors
-def file_cat(obj: ClientContext, sandbox_id: str, path: str, encoding: str) -> None:
+def file_cat(
+    obj: ClientContext,
+    sandbox_id: str,
+    path: str,
+    encoding: str,
+    output_format: str | None,
+) -> None:
     """Read a file from the sandbox."""
+    prepare_output(obj, output_format, allowed=("raw",), fallback="raw")
     sandbox = obj.connect_sandbox(sandbox_id)
     try:
         content = sandbox.files.read_file(path, encoding=encoding)
@@ -61,6 +79,7 @@ def file_cat(obj: ClientContext, sandbox_id: str, path: str, encoding: str) -> N
 @click.option("--mode", default=None, help="File permission mode (e.g. 0644).")
 @click.option("--owner", default=None, help="File owner.")
 @click.option("--group", default=None, help="File group.")
+@output_option("table", "json", "yaml")
 @click.pass_obj
 @handle_errors
 def file_write(
@@ -72,23 +91,26 @@ def file_write(
     mode: str | None,
     owner: str | None,
     group: str | None,
+    output_format: str | None,
 ) -> None:
     """Write content to a file in the sandbox."""
-    if content is None:
+    prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
+    file_content = content
+    if file_content is None:
         if sys.stdin.isatty():
             click.echo("Reading from stdin (Ctrl+D to finish):", err=True)
-        content = sys.stdin.read()
+        file_content = sys.stdin.read()
 
     sandbox = obj.connect_sandbox(sandbox_id)
     try:
         kwargs: dict = {"encoding": encoding}
         if mode is not None:
-            kwargs["mode"] = mode
+            kwargs["mode"] = _parse_permission_mode(mode)
         if owner is not None:
             kwargs["owner"] = owner
         if group is not None:
             kwargs["group"] = group
-        sandbox.files.write_file(path, content, **kwargs)
+        sandbox.files.write_file(path, file_content, **kwargs)
         obj.output.success(f"Written: {path}")
     finally:
         sandbox.close()
@@ -100,16 +122,22 @@ def file_write(
 @click.argument("sandbox_id")
 @click.argument("local_path", type=click.Path(exists=True))
 @click.argument("remote_path")
+@output_option("table", "json", "yaml")
 @click.pass_obj
 @handle_errors
 def file_upload(
-    obj: ClientContext, sandbox_id: str, local_path: str, remote_path: str
+    obj: ClientContext,
+    sandbox_id: str,
+    local_path: str,
+    remote_path: str,
+    output_format: str | None,
 ) -> None:
     """Upload a local file to the sandbox."""
-    data = Path(local_path).read_bytes()
+    prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
     sandbox = obj.connect_sandbox(sandbox_id)
     try:
-        sandbox.files.write_file(remote_path, data)
+        with Path(local_path).open("rb") as data:
+            sandbox.files.write_file(remote_path, data)
         obj.output.success(f"Uploaded: {local_path} → {remote_path}")
     finally:
         sandbox.close()
@@ -121,16 +149,25 @@ def file_upload(
 @click.argument("sandbox_id")
 @click.argument("remote_path")
 @click.argument("local_path", type=click.Path())
+@output_option("table", "json", "yaml")
 @click.pass_obj
 @handle_errors
 def file_download(
-    obj: ClientContext, sandbox_id: str, remote_path: str, local_path: str
+    obj: ClientContext,
+    sandbox_id: str,
+    remote_path: str,
+    local_path: str,
+    output_format: str | None,
 ) -> None:
     """Download a file from the sandbox to local disk."""
+    prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
     sandbox = obj.connect_sandbox(sandbox_id)
     try:
-        content = sandbox.files.read_bytes(remote_path)
-        Path(local_path).write_bytes(content)
+        destination = Path(local_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("wb") as out:
+            for chunk in sandbox.files.read_bytes_stream(remote_path):
+                out.write(chunk)
         obj.output.success(f"Downloaded: {remote_path} → {local_path}")
     finally:
         sandbox.close()
@@ -141,15 +178,25 @@ def file_download(
 @file_group.command("rm")
 @click.argument("sandbox_id")
 @click.argument("paths", nargs=-1, required=True)
+@output_option("table", "json", "yaml")
 @click.pass_obj
 @handle_errors
-def file_rm(obj: ClientContext, sandbox_id: str, paths: tuple[str, ...]) -> None:
+def file_rm(
+    obj: ClientContext,
+    sandbox_id: str,
+    paths: tuple[str, ...],
+    output_format: str | None,
+) -> None:
     """Delete files from the sandbox."""
+    prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
     sandbox = obj.connect_sandbox(sandbox_id)
     try:
         sandbox.files.delete_files(list(paths))
-        for p in paths:
-            obj.output.success(f"Deleted: {p}")
+        obj.output.print_rows(
+            [{"path": p, "status": "deleted"} for p in paths],
+            columns=["path", "status"],
+            title="Deleted Files",
+        )
     finally:
         sandbox.close()
 
@@ -160,12 +207,18 @@ def file_rm(obj: ClientContext, sandbox_id: str, paths: tuple[str, ...]) -> None
 @click.argument("sandbox_id")
 @click.argument("source")
 @click.argument("destination")
+@output_option("table", "json", "yaml")
 @click.pass_obj
 @handle_errors
 def file_mv(
-    obj: ClientContext, sandbox_id: str, source: str, destination: str
+    obj: ClientContext,
+    sandbox_id: str,
+    source: str,
+    destination: str,
+    output_format: str | None,
 ) -> None:
     """Move/rename a file in the sandbox."""
+    prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
     from opensandbox.models.filesystem import MoveEntry
 
     sandbox = obj.connect_sandbox(sandbox_id)
@@ -184,6 +237,7 @@ def file_mv(
 @click.option("--mode", default=None, help="Directory permission mode.")
 @click.option("--owner", default=None, help="Directory owner.")
 @click.option("--group", default=None, help="Directory group.")
+@output_option("table", "json", "yaml")
 @click.pass_obj
 @handle_errors
 def file_mkdir(
@@ -193,8 +247,10 @@ def file_mkdir(
     mode: str | None,
     owner: str | None,
     group: str | None,
+    output_format: str | None,
 ) -> None:
     """Create directories in the sandbox."""
+    prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
     from opensandbox.models.filesystem import WriteEntry
 
     sandbox = obj.connect_sandbox(sandbox_id)
@@ -203,15 +259,18 @@ def file_mkdir(
         for p in paths:
             kwargs: dict = {"path": p}
             if mode is not None:
-                kwargs["mode"] = mode
+                kwargs["mode"] = _parse_permission_mode(mode)
             if owner is not None:
                 kwargs["owner"] = owner
             if group is not None:
                 kwargs["group"] = group
             entries.append(WriteEntry(**kwargs))
         sandbox.files.create_directories(entries)
-        for p in paths:
-            obj.output.success(f"Created: {p}")
+        obj.output.print_rows(
+            [{"path": p, "status": "created"} for p in paths],
+            columns=["path", "status"],
+            title="Created Directories",
+        )
     finally:
         sandbox.close()
 
@@ -221,15 +280,25 @@ def file_mkdir(
 @file_group.command("rmdir")
 @click.argument("sandbox_id")
 @click.argument("paths", nargs=-1, required=True)
+@output_option("table", "json", "yaml")
 @click.pass_obj
 @handle_errors
-def file_rmdir(obj: ClientContext, sandbox_id: str, paths: tuple[str, ...]) -> None:
+def file_rmdir(
+    obj: ClientContext,
+    sandbox_id: str,
+    paths: tuple[str, ...],
+    output_format: str | None,
+) -> None:
     """Delete directories from the sandbox."""
+    prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
     sandbox = obj.connect_sandbox(sandbox_id)
     try:
         sandbox.files.delete_directories(list(paths))
-        for p in paths:
-            obj.output.success(f"Removed: {p}")
+        obj.output.print_rows(
+            [{"path": p, "status": "removed"} for p in paths],
+            columns=["path", "status"],
+            title="Removed Directories",
+        )
     finally:
         sandbox.close()
 
@@ -240,12 +309,18 @@ def file_rmdir(obj: ClientContext, sandbox_id: str, paths: tuple[str, ...]) -> N
 @click.argument("sandbox_id")
 @click.argument("path")
 @click.option("--pattern", "-p", required=True, help="Glob pattern to search for.")
+@output_option("table", "json", "yaml")
 @click.pass_obj
 @handle_errors
 def file_search(
-    obj: ClientContext, sandbox_id: str, path: str, pattern: str
+    obj: ClientContext,
+    sandbox_id: str,
+    path: str,
+    pattern: str,
+    output_format: str | None,
 ) -> None:
     """Search for files in the sandbox."""
+    prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
     from opensandbox.models.filesystem import SearchEntry
 
     sandbox = obj.connect_sandbox(sandbox_id)
@@ -270,18 +345,26 @@ def file_search(
 @file_group.command("info")
 @click.argument("sandbox_id")
 @click.argument("paths", nargs=-1, required=True)
+@output_option("table", "json", "yaml")
 @click.pass_obj
 @handle_errors
-def file_info(obj: ClientContext, sandbox_id: str, paths: tuple[str, ...]) -> None:
+def file_info(
+    obj: ClientContext,
+    sandbox_id: str,
+    paths: tuple[str, ...],
+    output_format: str | None,
+) -> None:
     """Get file/directory info."""
+    prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
     sandbox = obj.connect_sandbox(sandbox_id)
     try:
         info_map = sandbox.files.get_file_info(list(paths))
-        for path, entry in info_map.items():
-            obj.output.print_dict(
-                {"path": path, **entry.model_dump(mode="json")},
-                title=path,
-            )
+        rows = [{"path": path, **entry.model_dump(mode="json")} for path, entry in info_map.items()]
+        obj.output.print_rows(
+            rows,
+            columns=["path", "size", "mode", "owner", "group", "created_at", "modified_at"],
+            title="Path Info",
+        )
     finally:
         sandbox.close()
 
@@ -294,6 +377,7 @@ def file_info(obj: ClientContext, sandbox_id: str, paths: tuple[str, ...]) -> No
 @click.option("--mode", required=True, help="Permission mode (e.g. 0755).")
 @click.option("--owner", default=None, help="File owner.")
 @click.option("--group", default=None, help="File group.")
+@output_option("table", "json", "yaml")
 @click.pass_obj
 @handle_errors
 def file_chmod(
@@ -303,14 +387,23 @@ def file_chmod(
     mode: str,
     owner: str | None,
     group: str | None,
+    output_format: str | None,
 ) -> None:
     """Set file permissions."""
+    prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
     from opensandbox.models.filesystem import SetPermissionEntry
 
     sandbox = obj.connect_sandbox(sandbox_id)
     try:
         sandbox.files.set_permissions(
-            [SetPermissionEntry(path=path, mode=mode, owner=owner, group=group)]
+            [
+                SetPermissionEntry(
+                    path=path,
+                    mode=_parse_permission_mode(mode),
+                    owner=owner,
+                    group=group,
+                )
+            ]
         )
         obj.output.success(f"Permissions set: {path}")
     finally:
@@ -324,12 +417,19 @@ def file_chmod(
 @click.argument("path")
 @click.option("--old", required=True, help="Text to search for.")
 @click.option("--new", required=True, help="Replacement text.")
+@output_option("table", "json", "yaml")
 @click.pass_obj
 @handle_errors
 def file_replace(
-    obj: ClientContext, sandbox_id: str, path: str, old: str, new: str
+    obj: ClientContext,
+    sandbox_id: str,
+    path: str,
+    old: str,
+    new: str,
+    output_format: str | None,
 ) -> None:
     """Replace content in a file."""
+    prepare_output(obj, output_format, allowed=("table", "json", "yaml"), fallback="table")
     from opensandbox.models.filesystem import ContentReplaceEntry
 
     sandbox = obj.connect_sandbox(sandbox_id)

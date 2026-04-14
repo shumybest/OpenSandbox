@@ -29,9 +29,11 @@ import com.alibaba.opensandbox.sandbox.api.models.execd.Metrics
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Host
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkRule
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.OSSFS
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PVC
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PaginationInfo
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PlatformSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxCreateResponse
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxImageAuth
@@ -45,8 +47,10 @@ import java.time.OffsetDateTime
 import com.alibaba.opensandbox.sandbox.api.models.Host as ApiHost
 import com.alibaba.opensandbox.sandbox.api.models.NetworkPolicy as ApiNetworkPolicy
 import com.alibaba.opensandbox.sandbox.api.models.NetworkRule as ApiNetworkRule
+import com.alibaba.opensandbox.sandbox.api.models.OSSFS as ApiOSSFS
 import com.alibaba.opensandbox.sandbox.api.models.PVC as ApiPVC
 import com.alibaba.opensandbox.sandbox.api.models.PaginationInfo as ApiPaginationInfo
+import com.alibaba.opensandbox.sandbox.api.models.PlatformSpec as ApiPlatformSpec
 import com.alibaba.opensandbox.sandbox.api.models.Sandbox as ApiSandbox
 import com.alibaba.opensandbox.sandbox.api.models.SandboxStatus as ApiSandboxStatus
 import com.alibaba.opensandbox.sandbox.api.models.Volume as ApiVolume
@@ -193,6 +197,25 @@ internal object SandboxModelConverter {
     }
 
     /**
+     * Converts Domain OSSFS -> API OSSFS
+     */
+    fun OSSFS.toApiOSSFS(): ApiOSSFS {
+        return ApiOSSFS(
+            bucket = this.bucket,
+            endpoint = this.endpoint,
+            accessKeyId = this.accessKeyId,
+            accessKeySecret = this.accessKeySecret,
+            version =
+                when (this.version) {
+                    OSSFS.VERSION_1_0 -> ApiOSSFS.Version._1Period0
+                    OSSFS.VERSION_2_0 -> ApiOSSFS.Version._2Period0
+                    else -> throw IllegalArgumentException("Unsupported OSSFS version: ${this.version}")
+                },
+            options = this.options,
+        )
+    }
+
+    /**
      * Converts Domain Volume -> API Volume
      */
     fun Volume.toApiVolume(): ApiVolume {
@@ -202,6 +225,7 @@ internal object SandboxModelConverter {
             readOnly = this.readOnly,
             host = this.host?.toApiHost(),
             pvc = this.pvc?.toApiPVC(),
+            ossfs = this.ossfs?.toApiOSSFS(),
             subPath = this.subPath,
         )
     }
@@ -213,6 +237,7 @@ internal object SandboxModelConverter {
         metadata: Map<String, String>,
         timeout: Duration?,
         resource: Map<String, String>,
+        platform: PlatformSpec?,
         networkPolicy: NetworkPolicy?,
         extensions: Map<String, String>,
         volumes: List<Volume>?,
@@ -224,10 +249,37 @@ internal object SandboxModelConverter {
             env = env,
             metadata = metadata,
             resourceLimits = resource,
+            platform = platform?.toApiPlatformSpec(),
             networkPolicy = networkPolicy?.toApiNetworkPolicy(),
             extensions = extensions,
             volumes = volumes?.map { it.toApiVolume() },
         )
+    }
+
+    private fun PlatformSpec.toApiPlatformSpec(): ApiPlatformSpec {
+        val osValue =
+            when (this.os.lowercase()) {
+                "linux" -> ApiPlatformSpec.Os.linux
+                else -> throw IllegalArgumentException("Unsupported platform os: ${this.os}")
+            }
+        val archValue =
+            when (this.arch.lowercase()) {
+                "amd64" -> ApiPlatformSpec.Arch.amd64
+                "arm64" -> ApiPlatformSpec.Arch.arm64
+                else -> throw IllegalArgumentException("Unsupported platform arch: ${this.arch}")
+            }
+        return ApiPlatformSpec(
+            os = osValue,
+            arch = archValue,
+        )
+    }
+
+    private fun ApiPlatformSpec.toDomainPlatformSpec(): PlatformSpec {
+        return PlatformSpec
+            .builder()
+            .os(this.os.toString())
+            .arch(this.arch.toString())
+            .build()
     }
 
     /**
@@ -240,6 +292,7 @@ internal object SandboxModelConverter {
             expiresAt = this.expiresAt,
             createdAt = this.createdAt,
             image = this.image.toImageSpec(),
+            platform = this.platform?.toDomainPlatformSpec(),
             status = this.status.toSandboxStatus(),
             metadata = metadata,
         )
@@ -290,6 +343,7 @@ internal object SandboxModelConverter {
     fun CreateSandboxResponse.toSandboxCreateResponse(): SandboxCreateResponse {
         return SandboxCreateResponse(
             id = this.id,
+            platform = this.platform?.toDomainPlatformSpec(),
         )
     }
 

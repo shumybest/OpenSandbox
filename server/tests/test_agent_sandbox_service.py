@@ -12,10 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Unit tests for KubernetesSandboxService with agent-sandbox provider.
-"""
-
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
@@ -23,17 +19,16 @@ import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from src.api.schema import SandboxStatus
-from src.config import (
+from opensandbox_server.api.schema import SandboxStatus
+from opensandbox_server.config import (
     AppConfig,
     RuntimeConfig,
     ServerConfig,
     KubernetesRuntimeConfig,
     AgentSandboxRuntimeConfig,
 )
-from src.services.k8s.kubernetes_service import KubernetesSandboxService
-from src.services.constants import SandboxErrorCodes
-
+from opensandbox_server.services.k8s.kubernetes_service import KubernetesSandboxService
+from opensandbox_server.services.constants import SandboxErrorCodes
 
 @pytest.fixture
 def agent_sandbox_runtime_config():
@@ -44,7 +39,6 @@ def agent_sandbox_runtime_config():
         service_account="test-sa",
         workload_provider="agent-sandbox",
     )
-
 
 @pytest.fixture
 def agent_sandbox_app_config(agent_sandbox_runtime_config):
@@ -68,7 +62,6 @@ def agent_sandbox_app_config(agent_sandbox_runtime_config):
         ),
     )
 
-
 @pytest.fixture
 def app_config_docker():
     """Provide Docker type app configuration"""
@@ -86,14 +79,9 @@ def app_config_docker():
         kubernetes=None,
     )
 
-
 class TestAgentSandboxServiceInit:
-    """KubernetesSandboxService initialization tests (agent-sandbox provider)"""
 
     def test_init_with_valid_config_succeeds(self, agent_sandbox_runtime_config):
-        """
-        Test case: Successful initialization with valid config
-        """
         config = AppConfig(
             server=ServerConfig(
                 host="0.0.0.0",
@@ -113,8 +101,8 @@ class TestAgentSandboxServiceInit:
             ),
         )
 
-        with patch("src.services.k8s.kubernetes_service.K8sClient") as mock_k8s_client, patch(
-            "src.services.k8s.kubernetes_service.create_workload_provider"
+        with patch("opensandbox_server.services.k8s.kubernetes_service.K8sClient") as mock_k8s_client, patch(
+            "opensandbox_server.services.k8s.kubernetes_service.create_workload_provider"
         ) as mock_provider_factory:
             mock_provider_factory.return_value = MagicMock()
 
@@ -131,9 +119,6 @@ class TestAgentSandboxServiceInit:
             assert call_kwargs["app_config"].kubernetes == agent_sandbox_runtime_config
 
     def test_init_without_kubernetes_config_raises_error(self):
-        """
-        Test case: Raises exception when Kubernetes config is missing
-        """
         with pytest.raises(ValidationError, match="agent_sandbox block requires kubernetes.workload_provider"):
             AppConfig(
                 server=ServerConfig(
@@ -150,19 +135,12 @@ class TestAgentSandboxServiceInit:
                 agent_sandbox=AgentSandboxRuntimeConfig(),
             )
 
-
     def test_init_with_wrong_runtime_type_raises_error(self, app_config_docker):
-        """
-        Test case: Raises exception with wrong runtime type
-        """
         with pytest.raises(ValueError, match="requires runtime.type = 'kubernetes'"):
             KubernetesSandboxService(app_config_docker)
 
     def test_init_with_k8s_client_failure_raises_http_exception(self, agent_sandbox_app_config):
-        """
-        Test case: Raises HTTPException when K8sClient initialization fails
-        """
-        with patch("src.services.k8s.kubernetes_service.K8sClient") as mock_k8s_client:
+        with patch("opensandbox_server.services.k8s.kubernetes_service.K8sClient") as mock_k8s_client:
             mock_k8s_client.side_effect = Exception("Failed to load kubeconfig")
 
             with pytest.raises(HTTPException) as exc_info:
@@ -172,14 +150,9 @@ class TestAgentSandboxServiceInit:
             assert "code" in exc_info.value.detail
             assert exc_info.value.detail["code"] == SandboxErrorCodes.K8S_INITIALIZATION_ERROR
 
-
 class TestAgentSandboxServiceBuildSandbox:
-    """KubernetesSandboxService _build_sandbox_from_workload tests for agent-sandbox CRD"""
 
     def test_build_sandbox_from_workload_dict(self):
-        """
-        Test case: Verify sandbox fields are built from dict workload
-        """
         service = object.__new__(KubernetesSandboxService)
         service.workload_provider = MagicMock(
             get_expiration=MagicMock(return_value=datetime(2025, 12, 31, tzinfo=timezone.utc)),

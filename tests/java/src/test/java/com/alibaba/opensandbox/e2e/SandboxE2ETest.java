@@ -399,8 +399,9 @@ public class SandboxE2ETest extends BaseE2ETest {
         try {
             SandboxEndpoint egressEndpoint = policySandbox.getEndpoint(18080);
             assertTrue(
-                    egressEndpoint.getEndpoint().contains(
-                            "/sandboxes/" + policySandbox.getId() + "/proxy/18080"));
+                    egressEndpoint
+                            .getEndpoint()
+                            .contains("/sandboxes/" + policySandbox.getId() + "/proxy/18080"));
 
             NetworkPolicy initialPolicy = policySandbox.getEgressPolicy();
             assertNotNull(initialPolicy);
@@ -863,7 +864,7 @@ public class SandboxE2ETest extends BaseE2ETest {
 
     @Test
     @Order(3)
-    @DisplayName("Command execution: success, cwd, background, failure")
+    @DisplayName("Command execution: success, working directory, background, failure")
     @Timeout(value = 2, unit = TimeUnit.MINUTES)
     void testBasicCommandExecution() {
         assertNotNull(sandbox);
@@ -921,6 +922,11 @@ public class SandboxE2ETest extends BaseE2ETest {
         assertFalse(echoResult.getLogs().getStdout().get(0).isError());
         assertRecentTimestampMs(echoResult.getLogs().getStdout().get(0).getTimestamp(), 60_000);
         assertEquals(0, echoResult.getLogs().getStderr().size());
+        assertEquals(0, echoResult.getExitCode());
+        ExecutionComplete echoComplete = echoResult.getComplete();
+        assertNotNull(echoComplete);
+        assertTrue(echoComplete.getExecutionTimeInMillis() >= 0);
+        assertRecentTimestampMs(echoComplete.getTimestamp(), 180_000);
 
         assertTerminalEventContract(initEvents, completedEvents, errors, echoResult.getId());
         assertEquals(1, stdoutMessages.size());
@@ -940,12 +946,16 @@ public class SandboxE2ETest extends BaseE2ETest {
         assertEquals("/tmp", pwdResult.getLogs().getStdout().get(0).getText());
         assertFalse(pwdResult.getLogs().getStdout().get(0).isError());
         assertRecentTimestampMs(pwdResult.getLogs().getStdout().get(0).getTimestamp(), 60_000);
+        assertEquals(0, pwdResult.getExitCode());
+        ExecutionComplete pwdComplete = pwdResult.getComplete();
+        assertNotNull(pwdComplete);
+        assertTrue(pwdComplete.getExecutionTimeInMillis() >= 0);
 
         long startTime = System.currentTimeMillis();
         RunCommandRequest backgroundRequest =
                 RunCommandRequest.builder().command("sleep 30").background(true).build();
 
-        sandbox.commands().run(backgroundRequest);
+        Execution backgroundResult = sandbox.commands().run(backgroundRequest);
         long endTime = System.currentTimeMillis();
 
         long executionTime = endTime - startTime;
@@ -953,6 +963,7 @@ public class SandboxE2ETest extends BaseE2ETest {
                 executionTime < 10000,
                 String.format(
                         "Background command should return quickly, but took %d ms", executionTime));
+        assertNull(backgroundResult.getExitCode());
 
         // Failure case: contract error OR complete (mutually exclusive) and error must be present.
         stdoutMessages.clear();
@@ -982,6 +993,10 @@ public class SandboxE2ETest extends BaseE2ETest {
                                                         "nonexistent-command-that-does-not-exist")));
         assertTrue(failResult.getLogs().getStderr().stream().allMatch(OutputMessage::isError));
         assertRecentTimestampMs(failResult.getLogs().getStderr().get(0).getTimestamp(), 60_000);
+        assertNull(failResult.getComplete());
+        Integer failExitCode = failResult.getExitCode();
+        assertNotNull(failExitCode);
+        assertEquals(Integer.valueOf(failResult.getError().getValue()), failExitCode);
 
         assertTerminalEventContract(initEvents, completedEvents, errors, failResult.getId());
         assertTrue(completedEvents.isEmpty(), "Failing command should not emit completion event");
@@ -1034,6 +1049,119 @@ public class SandboxE2ETest extends BaseE2ETest {
         assertEquals(envValue, injectedOutput);
     }
 
+    @Test
+    @Order(4)
+    @DisplayName("Bash session API: working directory and env persistence")
+    @Timeout(value = 2, unit = TimeUnit.MINUTES)
+    void testBashSessionApiWorkingDirectoryAndEnvPersistence() {
+        assertNotNull(sandbox);
+
+        String sid = sandbox.commands().createSession("/tmp");
+        assertNotNull(sid);
+        assertFalse(sid.isBlank());
+
+        Execution run =
+                sandbox.commands()
+                        .runInSession(sid, RunInSessionRequest.builder().command("pwd").build());
+        assertNull(run.getError());
+        assertEquals(0, run.getExitCode());
+        String stdout =
+                run.getLogs().getStdout().stream()
+                        .map(OutputMessage::getText)
+                        .reduce("", (a, b) -> a.isEmpty() ? b : a + b)
+                        .trim();
+        assertEquals("/tmp", stdout);
+
+        run =
+                sandbox.commands()
+                        .runInSession(
+                                sid,
+                                RunInSessionRequest.builder()
+                                        .command("pwd")
+                                        .workingDirectory("/var")
+                                        .build());
+        assertNull(run.getError());
+        assertEquals(0, run.getExitCode());
+        stdout =
+                run.getLogs().getStdout().stream()
+                        .map(OutputMessage::getText)
+                        .reduce("", (a, b) -> a.isEmpty() ? b : a + b)
+                        .trim();
+        assertEquals("/var", stdout);
+
+        run =
+                sandbox.commands()
+                        .runInSession(
+                                sid,
+                                RunInSessionRequest.builder()
+                                        .command("pwd")
+                                        .workingDirectory("/tmp")
+                                        .build());
+        assertNull(run.getError());
+        assertEquals(0, run.getExitCode());
+        stdout =
+                run.getLogs().getStdout().stream()
+                        .map(OutputMessage::getText)
+                        .reduce("", (a, b) -> a.isEmpty() ? b : a + b)
+                        .trim();
+        assertEquals("/tmp", stdout);
+
+        run =
+                sandbox.commands()
+                        .runInSession(
+                                sid,
+                                RunInSessionRequest.builder()
+                                        .command("export E2E_SESSION_ENV=session-env-ok")
+                                        .build());
+        assertNull(run.getError());
+
+        run =
+                sandbox.commands()
+                        .runInSession(
+                                sid,
+                                RunInSessionRequest.builder()
+                                        .command("echo $E2E_SESSION_ENV")
+                                        .build());
+        assertNull(run.getError());
+        assertEquals(0, run.getExitCode());
+        stdout =
+                run.getLogs().getStdout().stream()
+                        .map(OutputMessage::getText)
+                        .reduce("", (a, b) -> a.isEmpty() ? b : a + b)
+                        .trim();
+        assertEquals("session-env-ok", stdout);
+
+        run =
+                sandbox.commands()
+                        .runInSession(
+                                sid,
+                                RunInSessionRequest.builder()
+                                        .command("sh -c 'echo session-fail >&2; exit 7'")
+                                        .build());
+        assertNotNull(run.getError());
+        assertEquals("CommandExecError", run.getError().getName());
+        assertEquals("7", run.getError().getValue());
+        assertEquals(Integer.valueOf(7), run.getExitCode());
+        assertNull(run.getComplete());
+
+        String sid2 = sandbox.commands().createSession("/var");
+        assertNotNull(sid2);
+        run =
+                sandbox.commands()
+                        .runInSession(sid2, RunInSessionRequest.builder().command("pwd").build());
+        assertNull(run.getError());
+        assertEquals(0, run.getExitCode());
+        stdout =
+                run.getLogs().getStdout().stream()
+                        .map(OutputMessage::getText)
+                        .reduce("", (a, b) -> a.isEmpty() ? b : a + b)
+                        .trim();
+        assertEquals("/var", stdout);
+
+        sandbox.commands().deleteSession(sid);
+        sandbox.commands().deleteSession(sid2);
+    }
+
     // ==========================================
     // Filesystem Operations Tests
     // ==========================================
@@ -1081,7 +1209,7 @@ public class SandboxE2ETest extends BaseE2ETest {
     @Order(5)
     @DisplayName("Filesystem operations: CRUD + replace/move/delete + mtime checks")
     @Timeout(value = 2, unit = TimeUnit.MINUTES)
-    void testBasicFilesystemOperations() {
+    void testBasicFilesystemOperations() throws Exception {
         assertNotNull(sandbox);
         String testDir1 = "/tmp/fs_test1_" + System.currentTimeMillis();
         String testDir2 = "/tmp/fs_test2_" + System.currentTimeMillis();
@@ -1309,6 +1437,28 @@ public class SandboxE2ETest extends BaseE2ETest {
                                                         + " && echo OK")
                                         .workingDirectory("/tmp")
                                         .build());
+        for (int attempt = 0; attempt < 3; attempt++) {
+            boolean verified =
+                    verify.getError() == null
+                            && verify.getLogs().getStdout().size() == 1
+                            && "OK".equals(verify.getLogs().getStdout().get(0).getText());
+            if (verified) {
+                break;
+            }
+            Thread.sleep(1000);
+            verify =
+                    sandbox.commands()
+                            .run(
+                                    RunCommandRequest.builder()
+                                            .command(
+                                                    "test ! -d "
+                                                            + testDir1
+                                                            + " && test ! -d "
+                                                            + testDir2
+                                                            + " && echo OK")
+                                            .workingDirectory("/tmp")
+                                            .build());
+        }
         assertNull(verify.getError());
         assertEquals(1, verify.getLogs().getStdout().size());
         assertEquals("OK", verify.getLogs().getStdout().get(0).getText());

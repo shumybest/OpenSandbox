@@ -139,11 +139,13 @@ class CodesAdapterTest {
                 .handlers(handlers)
                 .build()
 
-        codesAdapter.run(request)
+        val execution = codesAdapter.run(request)
 
         assertTrue(latch.await(2, TimeUnit.SECONDS), "Timed out waiting for completion")
         assertEquals("Hello World", receivedOutput.toString())
         assertEquals(100L, executionTime)
+        assertEquals(100L, execution.complete?.executionTimeInMillis)
+        assertEquals(null, execution.exitCode)
 
         val recordedRequest = mockWebServer.takeRequest()
         assertEquals("/code", recordedRequest.path)

@@ -20,9 +20,12 @@ import com.alibaba.opensandbox.sandbox.HttpClientProvider
 import com.alibaba.opensandbox.sandbox.config.ConnectionConfig
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkRule
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.OSSFS
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PlatformSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxFilter
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxImageSpec
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxState
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.Volume
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -73,6 +76,7 @@ class SandboxesAdapterTest {
             {
                 "id": "550e8400-e29b-41d4-a716-446655440000",
                 "status": { "state": "Running" },
+                "platform": { "os": "linux", "arch": "amd64" },
                 "expiresAt": "2023-01-01T11:00:00Z",
                 "createdAt": "2023-01-01T10:00:00Z",
                 "entrypoint": ["bash"]
@@ -101,6 +105,11 @@ class SandboxesAdapterTest {
                 metadata = mapOf("meta" to "data"),
                 timeout = Duration.ofSeconds(600),
                 resource = mapOf("cpu" to "1"),
+                platform =
+                    PlatformSpec.builder()
+                        .os("linux")
+                        .arch("arm64")
+                        .build(),
                 networkPolicy = networkPolicy,
                 extensions = extensions,
                 volumes = null,
@@ -128,9 +137,14 @@ class SandboxesAdapterTest {
         val rule = egressArray[0].jsonObject
         assertEquals("allow", rule["action"]!!.jsonPrimitive.content)
         assertEquals("pypi.org", rule["target"]!!.jsonPrimitive.content)
+        val gotPlatform = payload["platform"]?.jsonObject
+        assertNotNull(gotPlatform, "platform should be present in createSandbox request")
+        assertEquals("linux", gotPlatform!!["os"]!!.jsonPrimitive.content)
+        assertEquals("arm64", gotPlatform["arch"]!!.jsonPrimitive.content)
 
         // Verify response
         assertEquals("550e8400-e29b-41d4-a716-446655440000", result.id)
+        assertEquals("amd64", result.platform?.arch)
     }
 
     @Test
@@ -156,12 +170,72 @@ class SandboxesAdapterTest {
                 metadata = emptyMap(),
                 timeout = null,
                 resource = mapOf("cpu" to "1"),
+                platform = null,
                 networkPolicy = null,
                 extensions = emptyMap(),
                 volumes = null,
             )
 
         assertEquals("manual-sbx", result.id)
+    }
+
+    @Test
+    fun `createSandbox should serialize OSSFS volume`() {
+        val responseBody =
+            """
+            {
+                "id": "ossfs-sbx",
+                "status": { "state": "Running" },
+                "expiresAt": null,
+                "createdAt": "2023-01-01T10:00:00Z",
+                "entrypoint": ["bash"]
+            }
+            """.trimIndent()
+        mockWebServer.enqueue(MockResponse().setBody(responseBody).setResponseCode(201))
+
+        val spec = SandboxImageSpec.builder().image("ubuntu:latest").build()
+        val volumes =
+            listOf(
+                Volume.builder()
+                    .name("oss-data")
+                    .ossfs(
+                        OSSFS.builder()
+                            .bucket("bucket-a")
+                            .endpoint("oss-cn-hangzhou.aliyuncs.com")
+                            .accessKeyId("ak")
+                            .accessKeySecret("sk")
+                            .options("allow_other", "max_stat_cache_size=0")
+                            .build(),
+                    )
+                    .mountPath("/mnt/oss")
+                    .subPath("prefix")
+                    .build(),
+            )
+
+        sandboxesAdapter.createSandbox(
+            spec = spec,
+            entrypoint = listOf("bash"),
+            env = emptyMap(),
+            metadata = emptyMap(),
+            timeout = null,
+            resource = mapOf("cpu" to "1"),
+            platform = null,
+            networkPolicy = null,
+            extensions = emptyMap(),
+            volumes = volumes,
+        )
+
+        val request = mockWebServer.takeRequest()
+        val payload = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+        val serializedVolume = payload["volumes"]!!.jsonArray[0].jsonObject
+        val ossfs = serializedVolume["ossfs"]!!.jsonObject
+
+        assertEquals("bucket-a", ossfs["bucket"]!!.jsonPrimitive.content)
+        assertEquals("oss-cn-hangzhou.aliyuncs.com", ossfs["endpoint"]!!.jsonPrimitive.content)
+        assertEquals("ak", ossfs["accessKeyId"]!!.jsonPrimitive.content)
+        assertEquals("sk", ossfs["accessKeySecret"]!!.jsonPrimitive.content)
+        assertEquals("2.0", ossfs["version"]!!.jsonPrimitive.content)
+        assertEquals("prefix", serializedVolume["subPath"]!!.jsonPrimitive.content)
     }
 
     @Test

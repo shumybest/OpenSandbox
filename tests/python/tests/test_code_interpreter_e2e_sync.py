@@ -25,6 +25,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from datetime import timedelta
+from threading import Event
 
 import pytest
 from code_interpreter import CodeInterpreterSync
@@ -42,7 +43,11 @@ from opensandbox.models.execd import (
 from opensandbox.models.execd_sync import ExecutionHandlersSync
 from opensandbox.models.sandboxes import Host, SandboxImageSpec, Volume
 
-from tests.base_e2e_test import create_connection_config_sync, get_sandbox_image
+from tests.base_e2e_test import (
+    create_connection_config_sync,
+    get_e2e_sandbox_resource,
+    get_sandbox_image,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,14 +85,15 @@ def _assert_terminal_event_contract(
     errors: list[ExecutionError],
     execution_id: str | None,
 ) -> None:
-    # Contract: init must exist, and exactly one of (error, complete) exists.
+    # Contract: init must exist, and at least one terminal signal exists.
+    # For Jupyter-backed code execution, complete and error may coexist.
     assert len(init_events) == 1
     assert init_events[0].id is not None and init_events[0].id.strip()
     if execution_id is not None:
         assert init_events[0].id == execution_id
     _assert_recent_timestamp_ms(init_events[0].timestamp)
     assert (len(completed_events) > 0) or (len(errors) > 0), (
-        f"expected exactly one of complete/error, got complete={len(completed_events)} "
+        f"expected at least one of complete/error, got complete={len(completed_events)} "
         f"error={len(errors)}"
     )
     if len(completed_events) > 0:
@@ -282,6 +288,53 @@ class TestCodeInterpreterE2ESync:
                 except Exception:
                     pass
 
+    @pytest.fixture
+    def isolated_code_interpreter(self):
+        """Create an isolated sandbox+interpreter for high-flakiness run tests."""
+        connection_config = create_connection_config_sync()
+        sandbox = SandboxSync.create(
+            image=SandboxImageSpec(get_sandbox_image()),
+            entrypoint=["/opt/opensandbox/code-interpreter.sh"],
+            connection_config=connection_config,
+            resource=get_e2e_sandbox_resource(),
+            timeout=timedelta(minutes=15),
+            ready_timeout=timedelta(seconds=60),
+            metadata={"tag": "e2e-code-interpreter-isolated"},
+            env={
+                "E2E_TEST": "true",
+                "GO_VERSION": "1.25",
+                "JAVA_VERSION": "21",
+                "NODE_VERSION": "22",
+                "PYTHON_VERSION": "3.12",
+                "EXECD_LOG_FILE": "/tmp/opensandbox-e2e/logs/execd.log",
+            },
+            health_check_polling_interval=timedelta(milliseconds=500),
+            volumes=[
+                Volume(
+                    name="execd-log",
+                    host=Host(path="/tmp/opensandbox-e2e/logs"),
+                    mountPath="/tmp/opensandbox-e2e/logs",
+                    readOnly=False,
+                ),
+            ],
+        )
+        code_interpreter = CodeInterpreterSync.create(sandbox=sandbox)
+        try:
+            yield code_interpreter
+        finally:
+            try:
+                sandbox.kill()
+            except Exception as e:
+                logger.warning("Teardown(isolated): sandbox.kill() failed: %s", e, exc_info=True)
+            try:
+                sandbox.close()
+            except Exception as e:
+                logger.warning("Teardown(isolated): sandbox.close() failed: %s", e, exc_info=True)
+            try:
+                connection_config.transport.close()
+            except Exception:
+                pass
+
     @classmethod
     def _ensure_code_interpreter_created(cls) -> None:
         if cls._setup_done:
@@ -293,6 +346,7 @@ class TestCodeInterpreterE2ESync:
             image=SandboxImageSpec(get_sandbox_image()),
             entrypoint=["/opt/opensandbox/code-interpreter.sh"],
             connection_config=cls.connection_config,
+            resource=get_e2e_sandbox_resource(),
             timeout=timedelta(minutes=15),
             ready_timeout=timedelta(seconds=60),
             metadata={"tag": "e2e-code-interpreter"},
@@ -336,7 +390,10 @@ class TestCodeInterpreterE2ESync:
 
         info = code_interpreter.sandbox.get_info()
         assert str(code_interpreter.id) == str(info.id)
-        assert info.status.state == "Running"
+        # FIXME: upstream Kubernetes BatchSandbox lifecycle may still report
+        # "Allocated" after execd health checks already pass. This E2E focuses
+        # on end-to-end usability, so tolerate that transient state here.
+        assert info.status.state in {"Running", "Allocated"}
 
         endpoint = code_interpreter.sandbox.get_endpoint(DEFAULT_EXECD_PORT)
         assert endpoint is not None
@@ -362,10 +419,8 @@ class TestCodeInterpreterE2ESync:
 
     @pytest.mark.timeout(900)
     @pytest.mark.order(2)
-    def test_02_java_code_execution(self):
-        TestCodeInterpreterE2ESync._ensure_code_interpreter_created()
-        code_interpreter = TestCodeInterpreterE2ESync.code_interpreter
-        assert code_interpreter is not None
+    def test_02_java_code_execution(self, isolated_code_interpreter: CodeInterpreterSync):
+        code_interpreter = isolated_code_interpreter
 
         with managed_ctx_sync(code_interpreter, SupportedLanguage.JAVA) as java_context:
             assert java_context.id is not None and str(java_context.id).strip()
@@ -405,19 +460,23 @@ class TestCodeInterpreterE2ESync:
                 on_init=on_init,
             )
 
-            simple_result = code_interpreter.codes.run(
+            # Use retry for first execution in context because Java kernel init can be slow.
+            simple_result = run_with_retry_sync(
+                code_interpreter,
                 "System.out.println(\"Hello from Java!\");\n"
                 + "int result = 2 + 2;\n"
                 + "System.out.println(\"2 + 2 = \" + result);\n"
                 + "result",
                 context=java_context,
                 handlers=handlers,
-                )
+            )
             assert simple_result is not None
             assert simple_result.id is not None and simple_result.id.strip()
             assert simple_result.error is None
             assert len(simple_result.result) > 0
             assert simple_result.result[0].text == "4"
+            assert simple_result.exit_code is None
+            assert simple_result.complete is not None
 
             _assert_terminal_event_contract(
                 init_events=init_events,
@@ -447,6 +506,8 @@ class TestCodeInterpreterE2ESync:
             assert var_result.id is not None
             assert len(var_result.result) > 0
             assert var_result.result[0].text == "4"
+            assert var_result.exit_code is None
+            assert var_result.complete is not None
 
             stdout_messages.clear()
             stderr_messages.clear()
@@ -463,6 +524,7 @@ class TestCodeInterpreterE2ESync:
             assert error_result.id is not None and error_result.id.strip()
             assert error_result.error is not None
             assert error_result.error.name == "EvalException"
+            assert error_result.exit_code is None
             _assert_terminal_event_contract(
                 init_events=init_events,
                 completed_events=completed_events,
@@ -474,10 +536,8 @@ class TestCodeInterpreterE2ESync:
 
     @pytest.mark.timeout(900)
     @pytest.mark.order(3)
-    def test_03_python_code_execution(self):
-        TestCodeInterpreterE2ESync._ensure_code_interpreter_created()
-        code_interpreter = TestCodeInterpreterE2ESync.code_interpreter
-        assert code_interpreter is not None
+    def test_03_python_code_execution(self, isolated_code_interpreter: CodeInterpreterSync):
+        code_interpreter = isolated_code_interpreter
 
         # New usage: directly pass a language string (ephemeral context).
         # This validates the `codes.run(..., language=...)` convenience interface.
@@ -591,10 +651,8 @@ class TestCodeInterpreterE2ESync:
 
     @pytest.mark.timeout(900)
     @pytest.mark.order(4)
-    def test_04_go_code_execution(self):
-        TestCodeInterpreterE2ESync._ensure_code_interpreter_created()
-        code_interpreter = TestCodeInterpreterE2ESync.code_interpreter
-        assert code_interpreter is not None
+    def test_04_go_code_execution(self, isolated_code_interpreter: CodeInterpreterSync):
+        code_interpreter = isolated_code_interpreter
 
         with managed_ctx_sync(code_interpreter, SupportedLanguage.GO) as go_context:
             assert go_context.id is not None and str(go_context.id).strip()
@@ -692,10 +750,8 @@ class TestCodeInterpreterE2ESync:
 
     @pytest.mark.timeout(900)
     @pytest.mark.order(5)
-    def test_05_typescript_code_execution(self):
-        TestCodeInterpreterE2ESync._ensure_code_interpreter_created()
-        code_interpreter = TestCodeInterpreterE2ESync.code_interpreter
-        assert code_interpreter is not None
+    def test_05_typescript_code_execution(self, isolated_code_interpreter: CodeInterpreterSync):
+        code_interpreter = isolated_code_interpreter
 
         with managed_ctx_sync(code_interpreter, SupportedLanguage.TYPESCRIPT) as ts_context:
             assert ts_context.id is not None and str(ts_context.id).strip()
@@ -783,10 +839,10 @@ class TestCodeInterpreterE2ESync:
 
     @pytest.mark.timeout(900)
     @pytest.mark.order(6)
-    def test_06_multi_language_support_and_context_isolation(self):
-        TestCodeInterpreterE2ESync._ensure_code_interpreter_created()
-        code_interpreter = TestCodeInterpreterE2ESync.code_interpreter
-        assert code_interpreter is not None
+    def test_06_multi_language_support_and_context_isolation(
+        self, isolated_code_interpreter: CodeInterpreterSync
+    ):
+        code_interpreter = isolated_code_interpreter
 
         with managed_ctx_stack_sync(
             code_interpreter,
@@ -872,10 +928,8 @@ class TestCodeInterpreterE2ESync:
 
     @pytest.mark.timeout(900)
     @pytest.mark.order(7)
-    def test_07_concurrent_code_execution(self):
-        TestCodeInterpreterE2ESync._ensure_code_interpreter_created()
-        code_interpreter = TestCodeInterpreterE2ESync.code_interpreter
-        assert code_interpreter is not None
+    def test_07_concurrent_code_execution(self, isolated_code_interpreter: CodeInterpreterSync):
+        code_interpreter = isolated_code_interpreter
 
         with managed_ctx_stack_sync(
             code_interpreter,
@@ -957,10 +1011,8 @@ class TestCodeInterpreterE2ESync:
 
     @pytest.mark.timeout(900)
     @pytest.mark.order(8)
-    def test_08_code_execution_interrupt(self):
-        TestCodeInterpreterE2ESync._ensure_code_interpreter_created()
-        code_interpreter = TestCodeInterpreterE2ESync.code_interpreter
-        assert code_interpreter is not None
+    def test_08_code_execution_interrupt(self, isolated_code_interpreter: CodeInterpreterSync):
+        code_interpreter = isolated_code_interpreter
 
         with managed_ctx_sync(code_interpreter, SupportedLanguage.PYTHON) as python_int_context:
             assert python_int_context is not None and python_int_context.id is not None and str(python_int_context.id).strip()
@@ -968,9 +1020,11 @@ class TestCodeInterpreterE2ESync:
             init_events_int: list[ExecutionInit] = []
             completed_events: list[ExecutionComplete] = []
             errors: list[ExecutionError] = []
+            init_received = Event()
 
             def on_init(init: ExecutionInit):
                 init_events_int.append(init)
+                init_received.set()
 
             def on_complete(complete: ExecutionComplete):
                 completed_events.append(complete)
@@ -997,10 +1051,7 @@ class TestCodeInterpreterE2ESync:
                     handlers=handlers_int,
                     )
 
-                deadline = time.time() + 15
-                while len(init_events_int) == 0 and time.time() < deadline:
-                    time.sleep(0.1)
-
+                assert init_received.wait(timeout=15), "Execution init event was not received within 15s"
                 assert len(init_events_int) == 1, "Execution should have been initialized exactly once"
                 execution_id = init_events_int[-1].id
                 assert execution_id is not None and execution_id.strip()
