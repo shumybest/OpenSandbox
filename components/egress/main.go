@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	_ "github.com/alibaba/opensandbox/egress/hooks"
 	_ "github.com/alibaba/opensandbox/internal/safego"
 	_ "go.uber.org/automaxprocs/maxprocs"
 
@@ -31,7 +32,9 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/events"
 	"github.com/alibaba/opensandbox/egress/pkg/iptables"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
+	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
+	"github.com/alibaba/opensandbox/egress/pkg/startup"
 	"github.com/alibaba/opensandbox/egress/pkg/telemetry"
 	slogger "github.com/alibaba/opensandbox/internal/logger"
 	"github.com/alibaba/opensandbox/internal/safego"
@@ -103,22 +106,35 @@ func main() {
 
 	setupNft(ctx, nftMgr, initialRules, proxy, allowIPs, alwaysDeny, alwaysAllow)
 
-	// start policy server
 	httpAddr := envOrDefault(constants.EnvEgressHTTPAddr, constants.DefaultEgressServerAddr)
-	policySrv, err := startPolicyServer(proxy, nftMgr, mode, httpAddr, os.Getenv(constants.EnvEgressToken), allowIPs, os.Getenv(constants.EnvEgressPolicyFile), alwaysDeny, alwaysAllow)
+	mitmGate := mitmproxy.NewHealthGate()
+	policySrv, err := startPolicyServer(proxy, nftMgr, mode, httpAddr, os.Getenv(constants.EnvEgressToken), allowIPs, os.Getenv(constants.EnvEgressPolicyFile), alwaysDeny, alwaysAllow, mitmGate)
 	if err != nil {
 		log.Fatalf("failed to start policy server: %v", err)
 	}
 	log.Infof("policy server listening on %s (POST /policy)", httpAddr)
 
-	waitForShutdown(ctx, proxy, policySrv, exemptDst, nftMgr)
+	mitm, err := startMitmproxyTransparentIfEnabled()
+	if err != nil {
+		log.Fatalf("mitmproxy transparent: %v", err)
+	}
+	mitmGate.MarkStackReady()
+	if mitm != nil {
+		mitm.watchMitmproxy(ctx, mitmGate)
+	}
+
+	if err := startup.RunPost(ctx); err != nil {
+		log.Errorf("startup hooks (post) error: %v", err)
+	}
+
+	waitForShutdown(ctx, proxy, policySrv, exemptDst, nftMgr, mitm)
 }
 
 func withLogger(ctx context.Context) context.Context {
 	level := envOrDefault(constants.EnvEgressLogLevel, "info")
 	cfg := slogger.Config{Level: level}
 	base := slogger.MustNew(cfg)
-	// Fixed dimensions for every log line (sandbox_id, optional OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS).
+	// Baseline log fields (e.g. sandbox_id, OPENSANDBOX_EGRESS_METRICS_EXTRA_ATTRS) for every line.
 	if extra := telemetry.EgressLogFields(); len(extra) > 0 {
 		base = base.With(extra...)
 	}
@@ -134,15 +150,6 @@ func envOrDefault(key, defaultVal string) string {
 	return defaultVal
 }
 
-func isTruthy(v string) bool {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "1", "true", "yes", "y", "on":
-		return true
-	default:
-		return false
-	}
-}
-
 func containsAddr(addrs []netip.Addr, a netip.Addr) bool {
 	for _, x := range addrs {
 		if x == a {
@@ -153,14 +160,11 @@ func containsAddr(addrs []netip.Addr, a netip.Addr) bool {
 }
 
 func parseMode() string {
-	mode := strings.ToLower(strings.TrimSpace(os.Getenv(constants.EnvEgressMode)))
-	switch mode {
-	case "", constants.PolicyDnsOnly:
-		return constants.PolicyDnsOnly
-	case constants.PolicyDnsNft:
-		return constants.PolicyDnsNft
-	default:
-		log.Warnf("invalid %s=%s, falling back to dns", constants.EnvEgressMode, mode)
+	raw := os.Getenv(constants.EnvEgressMode)
+	normalized, err := constants.ParseEgressMode(raw)
+	if err != nil {
+		log.Warnf("invalid %s=%q: %v; falling back to %s", constants.EnvEgressMode, raw, err, constants.PolicyDnsOnly)
 		return constants.PolicyDnsOnly
 	}
+	return normalized
 }

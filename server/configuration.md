@@ -21,17 +21,19 @@ Example files in this repository:
 
 1. [Top-level sections](#top-level-sections)
 2. [`[server]`](#server--lifecycle-api)
-3. [`[runtime]`](#runtime--required)
-4. [`[docker]`](#docker--only-when-runtime--docker)
-5. [`[kubernetes]`](#kubernetes--only-when-runtime--kubernetes)
-6. [`[agent_sandbox]`](#agent_sandbox--only-with-kubernetes--agent-sandbox)
-7. [`[ingress]`](#ingress)
-8. [`[egress]`](#egress)
-9. [`[storage]`](#storage)
-10. [`[secure_runtime]`](#secure_runtime)
-11. [`[renew_intent]`](#renew_intent--experimental)
-12. [Environment variables (outside TOML)](#environment-variables-outside-toml)
-13. [Cross-field validation rules](#cross-field-validation-rules)
+3. [`[log]`](#log)
+4. [`[runtime]`](#runtime--required)
+5. [`[docker]`](#docker--only-when-runtime--docker)
+6. [`[kubernetes]`](#kubernetes--only-when-runtime--kubernetes)
+7. [`[agent_sandbox]`](#agent_sandbox--only-with-kubernetes--agent-sandbox)
+8. [`[ingress]`](#ingress)
+9. [`[egress]`](#egress)
+10. [`[storage]`](#storage)
+11. [`[store]`](#store)
+12. [`[secure_runtime]`](#secure_runtime)
+13. [`[renew_intent]`](#renew_intent--experimental)
+14. [Environment variables (outside TOML)](#environment-variables-outside-toml)
+15. [Cross-field validation rules](#cross-field-validation-rules)
 
 ---
 
@@ -40,6 +42,7 @@ Example files in this repository:
 | Section | Required | When |
 |---------|----------|------|
 | `[server]` | No | Always (defaults apply if omitted) |
+| `[log]` | No | Always (defaults apply if omitted) |
 | `[runtime]` | **Yes** | Always |
 | `[docker]` | No | `runtime.type = "docker"` |
 | `[kubernetes]` | No | `runtime.type = "kubernetes"` (defaults are applied if missing) |
@@ -47,6 +50,7 @@ Example files in this repository:
 | `[ingress]` | No | Optional; see [Ingress](#ingress) |
 | `[egress]` | No | Required values when clients use `networkPolicy` on create |
 | `[storage]` | No | Host bind mounts / OSSFS mount root |
+| `[store]` | No | Server-managed persistent metadata backend |
 | `[secure_runtime]` | No | gVisor / Kata / Firecracker |
 | `[renew_intent]` | No | Experimental auto-renew on access |
 
@@ -58,10 +62,23 @@ Example files in this repository:
 |-----|------|---------|-------------|
 | `host` | string | `"0.0.0.0"` | Bind address for the HTTP API. |
 | `port` | integer | `8080` | Listen port (1–65535). |
-| `log_level` | string | `"INFO"` | Python logging level for the server process. |
-| `api_key` | string \| omitted | `null` | If set to a non-empty string, requests must send header `OPEN-SANDBOX-API-KEY` with this value (except documented public routes such as `/health`, `/docs`, `/redoc`). If omitted or empty, API key checks are skipped (typical for local dev only). |
+| `api_key` | string \| omitted | `null` | If set to a non-empty string, requests must send header `OPEN-SANDBOX-API-KEY` with this value (except documented public routes such as `/health`, `/docs`, `/redoc`). If omitted or empty, API key checks are skipped, but startup now requires explicit risk acknowledgment: interactive TTY confirmation (`YES`) or `OPENSANDBOX_INSECURE_SERVER=YES`. |
 | `eip` | string \| omitted | `null` | Public IP or hostname used as the **host part** when the server returns sandbox endpoint URLs (notably Docker runtime). |
 | `max_sandbox_timeout_seconds` | integer \| omitted | `null` | Upper bound on sandbox TTL in seconds for **create** requests that specify `timeout`. Must be ≥ **60** if set. Omit to disable the server-side cap. |
+| `timeout_keep_alive` | integer | `30` | Idle keep-alive timeout (seconds) passed to uvicorn. |
+
+---
+
+## `[log]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `level` | string | `"INFO"` | Python logging level for the server process (e.g. `"DEBUG"`, `"INFO"`, `"WARNING"`). |
+| `file_enabled` | boolean | `false` | When `true`, logs are written to rotating files instead of stdout. |
+| `file_path` | string \| omitted | `null` | Override path for the main log file. Defaults to `~/logs/opensandbox/server.log` when `file_enabled = true`. |
+| `access_file_path` | string \| omitted | `null` | Override path for the HTTP access log file. Defaults to `~/logs/opensandbox/access.log` when `file_enabled = true`. |
+| `file_max_bytes` | integer | `104857600` (100 MB) | Max bytes per log file before rotation. |
+| `file_backup_count` | integer | `5` | Number of rotated log files to retain. |
 
 ---
 
@@ -100,8 +117,10 @@ If `runtime.type = "kubernetes"` and the `[kubernetes]` table is absent, the ser
 | `service_account` | string \| omitted | `null` | ServiceAccount name bound to workload pods. |
 | `workload_provider` | string \| omitted | `null` | One of: **`batchsandbox`**, **`agent-sandbox`**. If omitted, the **first registered** provider is used (currently **`batchsandbox`**). |
 | `batchsandbox_template_file` | string \| omitted | `null` | Path to **BatchSandbox** CR YAML template when `workload_provider = "batchsandbox"`. |
+| `image_pull_policy` | string \| omitted | `"IfNotPresent"` | Image pull policy for the BatchSandbox main container. Values: **`Always`**, **`IfNotPresent`**, **`Never`**. |
 | `sandbox_create_timeout_seconds` | integer | `60` | Max time to wait for a new sandbox to become ready (e.g. IP assigned), in seconds. |
 | `sandbox_create_poll_interval_seconds` | float | `1.0` | Poll interval while waiting for readiness. |
+| `snapshot_create_timeout_seconds` | integer | `900` | Max time to wait for a Kubernetes public snapshot to become ready, in seconds. Set this greater than the controller snapshot `commitJobTimeout` / `--commit-job-timeout`. |
 | `informer_enabled` | boolean | `true` | **[Beta]** Use informer/watch cache for reads to reduce API load. |
 | `informer_resync_seconds` | integer | `300` | **[Beta]** Full resync period for the informer cache. |
 | `informer_watch_timeout_seconds` | integer | `60` | **[Beta]** Watch stream restart interval. |
@@ -119,9 +138,10 @@ Kubernetes workloads are created by a **workload provider**. There is **no** `[b
 |--|--------------------------------------|--------------------------------------------------------------------------------------------------------|
 | `kubernetes.workload_provider` | `"batchsandbox"` or **omit** (factory default is `batchsandbox`) | `"agent-sandbox"` |
 | Template file | **`kubernetes.batchsandbox_template_file`** — path to **BatchSandbox** CR YAML | **`agent_sandbox.template_file`** in [`[agent_sandbox]`](#agent_sandbox--only-with-kubernetes--agent-sandbox) |
+| Image pull policy | **`kubernetes.image_pull_policy`** — writes `imagePullPolicy` into the BatchSandbox pod template main container | Not currently used |
 | Extra TOML table | None | **`[agent_sandbox]`** is required (see below) |
 
-**BatchSandbox-only config key in `config.py`:** `batchsandbox_template_file` on `KubernetesRuntimeConfig`. Everything else in the `[kubernetes]` table (namespace, kubeconfig, informer, API QPS, `sandbox_create_*`, `execd_init_resources`, …) applies to **whichever** provider you select.
+**BatchSandbox-only config keys in `config.py`:** `batchsandbox_template_file` and `image_pull_policy` on `KubernetesRuntimeConfig`. Everything else in the `[kubernetes]` table (namespace, kubeconfig, informer, API QPS, `sandbox_create_*`, `execd_init_resources`, …) applies to **whichever** provider you select.
 
 ### `kubernetes.execd_init_resources`
 
@@ -147,6 +167,7 @@ Used with the **kubernetes-sigs/agent-sandbox** Sandbox CRD provider.
 ## `[ingress]`
 
 Controls how **ingress exposure** is described for sandbox endpoints (especially behind gateways). **When `runtime.type = "docker"`, only `mode = "direct"` is allowed.**
+`secureAccess` is currently supported only for **Kubernetes** sandboxes when **`ingress.mode = "gateway"`**.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -198,10 +219,34 @@ Host-side storage related to **volume mounts** (host bind allowlist and OSSFS mo
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `allowed_host_paths` | list of strings | `[]` | Absolute path **prefixes** allowed for **host** bind mounts. If **empty**, all host paths are allowed (**unsafe for production**). |
+| `allowed_host_paths` | list of strings | `[]` | Absolute path **prefixes** allowed for **host** bind mounts. If **empty**, all host bind mounts are rejected (secure-by-default). |
 | `ossfs_mount_root` | string | `"/mnt/ossfs"` | Host directory under which OSSFS-backed mounts are resolved (`<root>/<bucket>/...`). |
+| `volume_default_size` | string | `"1Gi"` | Default storage size for auto-created Kubernetes PVCs when the caller does not specify a size in the PVC provisioning hints. |
 
 Sandbox **volume** models (`host`, `pvc`, `ossfs`) in API requests are documented in the OpenAPI specs and OSEPs; this table only covers **server** storage settings.
+
+---
+
+## `[store]`
+
+Configures the persistence backend for **server-managed resources**. This is a
+server-wide store, not a snapshot-specific backend. Snapshot metadata is the
+first resource persisted here; future persistent server resources should reuse
+the same backend.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `type` | string | `"sqlite"` | Server persistence backend type. Currently only **`sqlite`** is supported. |
+| `path` | string | `"~/.opensandbox/opensandbox.db"` | Filesystem path to the SQLite database file used for server-managed metadata. Parent directories are created automatically when needed. |
+
+**Notes**
+
+- The default SQLite backend gives local and single-node deployments persistent
+  metadata without requiring an external database service.
+- `memory` is intentionally **not** the default because server-managed snapshot
+  resources must survive process restarts.
+- Higher-level components should depend on repository abstractions rather than
+  importing `sqlite3` directly.
 
 ---
 
@@ -251,6 +296,7 @@ These are read by the server or runtime code in addition to the TOML file:
 | Variable | Where used | Description |
 |----------|------------|-------------|
 | `SANDBOX_CONFIG_PATH` | `config.py`, CLI | Path to the TOML file. Overrides the default `~/.sandbox.toml` when set. |
+| `OPENSANDBOX_SERVER_API_KEY` | `config.py` | Overrides the API key from the TOML file. |
 | `DOCKER_HOST` | Docker service | Standard Docker daemon address (e.g. `unix:///var/run/docker.sock`). |
 | `PENDING_FAILURE_TTL` | Docker service | Seconds to retain **failed Pending** sandboxes before cleanup; default **`3600`**. |
 

@@ -19,6 +19,9 @@
   <a href="https://www.apache.org/licenses/LICENSE-2.0.html">
     <img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="license" />
   </a>
+  <a href="https://www.bestpractices.dev/projects/12588">
+    <img src="https://www.bestpractices.dev/projects/12588/badge" alt="OpenSSF Best Practices" />
+  </a>
   <a href="https://badge.fury.io/py/opensandbox">
     <img src="https://badge.fury.io/py/opensandbox.svg" alt="PyPI version" />
   </a>
@@ -100,6 +103,56 @@ Go:
 ```bash
 go get github.com/alibaba/OpenSandbox/sdks/sandbox/go
 ```
+
+## CLI
+
+OpenSandbox also provides `osb`, a terminal CLI for the common sandbox workflow: create sandboxes, run commands, move files, inspect diagnostics, and manage runtime egress policy.
+
+Install:
+
+```bash
+pip install opensandbox-cli
+# or
+uv tool install opensandbox-cli
+```
+
+Quick start:
+
+```bash
+osb config init
+osb config set connection.domain localhost:8080
+osb config set connection.protocol http
+osb sandbox create --image python:3.12 --timeout 30m -o json
+osb command run <sandbox-id> -o raw -- python -c "print(1 + 1)"
+```
+
+See the [CLI README](cli/README.md) for the full command reference.
+
+## MCP
+
+The OpenSandbox MCP server exposes sandbox creation, command execution, and text file operations to MCP-capable clients such as Claude Code and Cursor.
+
+Install and run:
+
+```bash
+pip install opensandbox-mcp
+opensandbox-mcp --domain localhost:8080 --protocol http
+```
+
+Minimal stdio config:
+
+```json
+{
+  "mcpServers": {
+    "opensandbox": {
+      "command": "opensandbox-mcp",
+      "args": ["--domain", "localhost:8080", "--protocol", "http"]
+    }
+  }
+}
+```
+
+See the [MCP README](sdks/mcp/sandbox/python/README.md) for client-specific setup.
 
 ## Getting Started
 
@@ -223,6 +276,7 @@ For more details, please refer to [examples](examples/README.md) and the README 
 | [`sdks/`](sdks/) | Multi-language SDKs (Python, Java/Kotlin, TypeScript/JavaScript, C#/.NET) |
 | [`specs/`](specs/README.md) | OpenAPI specs and lifecycle specifications                      |
 | [`server/`](server/README.md) | Python FastAPI sandbox lifecycle server                          |
+| [`cli/`](cli/README.md) | OpenSandbox command-line interface                               |
 | [`kubernetes/`](kubernetes/README.md) | Kubernetes deployment and examples                               |
 | [`components/execd/`](components/execd/README.md) | Sandbox execution daemon (commands and file operations)          |
 | [`components/ingress/`](components/ingress/README.md) | Sandbox traffic ingress proxy                                    |
@@ -239,38 +293,31 @@ For detailed architecture, see [docs/architecture.md](docs/architecture.md).
 ## Documentation
 
 - [docs/architecture.md](docs/architecture.md) – Overall architecture & design philosophy
+- [docs/release-verification.md](docs/release-verification.md) - Release signing and artifact verification
 - [oseps/README.md](oseps/README.md) – OpenSandbox Enhancement Proposals
 - SDK
   - Sandbox base SDK ([Java/Kotlin SDK](sdks/sandbox/kotlin/README.md), [Python SDK](sdks/sandbox/python/README.md), [JavaScript/TypeScript SDK](sdks/sandbox/javascript/README.md), [C#/.NET SDK](sdks/sandbox/csharp/README.md)), [Go SDK](sdks/sandbox/go/README.md) - includes sandbox lifecycle, command execution, file operations
   - Code Interpreter SDK ([Java/Kotlin SDK](sdks/code-interpreter/kotlin/README.md), [Python SDK](sdks/code-interpreter/python/README.md), [JavaScript/TypeScript SDK](sdks/code-interpreter/javascript/README.md), [C#/.NET SDK](sdks/code-interpreter/csharp/README.md)) - code interpreter
+- [cli/README.md](cli/README.md) - OpenSandbox CLI installation and command reference
+- [sdks/mcp/sandbox/python/README.md](sdks/mcp/sandbox/python/README.md) - MCP server installation and client setup
 - [specs/README.md](specs/README.md) - OpenAPI definitions for sandbox lifecycle API and sandbox execution API
 - [server/README.md](server/README.md) - Sandbox server startup and configuration; supports Docker and Kubernetes runtimes
+- [ROADMAP.md](ROADMAP.md) - Lightweight project roadmap and planning process
 
 ## License
 
 This project is open source under the [Apache 2.0 License](LICENSE).
 
-## Roadmap [2026.03]
+## Roadmap
 
-### SDK
-
-- **Sandbox client connection pool** - Client-side sandbox connection pool management, providing pre-provisioned sandboxes to obtain an environment at X ms.
-- **Go SDK** - Go client SDK for sandbox lifecycle management, command execution, and file operations.
-
-### Sandbox Runtime
-
-- **Persistent volumes** - Mountable persistent volumes for sandboxes (see [Proposal 0003](oseps/0003-volume-and-volumebinding-support.md)).
-- **Local lightweight sandbox** - Lightweight sandbox for AI tools running directly on PCs.
-- **Secure Container** - Secure sandbox for AI Agents running inside container.
-
-### Deployment
-
-- **Guide** - Deployment guide for self-hosted Kubernetes cluster.
+See [ROADMAP.md](ROADMAP.md) for the current project roadmap, planning scope,
+and how roadmap items are managed.
 
 ## Contact and Discussion
 
 - Issues: Submit bugs, feature requests, or design discussions through GitHub Issues
 - DingTalk: Join the [OpenSandbox technical discussion group](https://qr.dingtalk.com/action/joingroup?code=v1,k1,A4Bgl5q1I1eNU/r33D18YFNrMY108aFF38V+r19RJOM=&_dt_no_comment=1&origin=11)
+
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=alibaba/OpenSandbox&type=date&legend=top-left)](https://www.star-history.com/#alibaba/OpenSandbox&type=date&legend=top-left)

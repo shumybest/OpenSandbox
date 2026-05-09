@@ -10,8 +10,7 @@ on:
       - 'server/opensandbox_server/**'
       - 'components/execd/**'
       - 'components/egress/**'
-      - 'sdks/code-interpreter/**'
-      - 'sdks/sandbox/**'
+      - 'sdks/**'
       - 'tests/**'
   push:
     branches: [ main ]
@@ -40,12 +39,28 @@ jobs:
       - name: Clean up previous E2E resources
         run: |
           docker ps -aq --filter "label=opensandbox" | xargs -r docker rm -f || true
+          docker rm -f opensandbox-e2e-redis || true
           # Remove root-owned files from previous sandbox runs by mounting parent dir
           docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
           docker image prune -f || true
 
       - name: Build local egress image
         run: docker build -t opensandbox/egress:local -f components/egress/Dockerfile .
+
+      - name: Start Redis for Python pool E2E
+        run: |
+          docker rm -f opensandbox-e2e-redis || true
+          docker run -d --name opensandbox-e2e-redis -p 127.0.0.1::6379 redis:7-alpine
+          REDIS_PORT="$(docker inspect -f '{{(index (index .NetworkSettings.Ports "6379/tcp") 0).HostPort}}' opensandbox-e2e-redis)"
+          echo "OPENSANDBOX_TEST_REDIS_URL=redis://127.0.0.1:${REDIS_PORT}/0" >> "$GITHUB_ENV"
+          for i in {1..30}; do
+            if docker exec opensandbox-e2e-redis redis-cli ping | grep -q PONG; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs opensandbox-e2e-redis
+          exit 1
 
       - name: Run tests
         run: |
@@ -56,8 +71,9 @@ jobs:
           [server]
           host = "127.0.0.1"
           port = 8080
-          log_level = "INFO"
           api_key = ""
+          [log]
+          level = "INFO"
           [runtime]
           type = "docker"
           execd_image = "opensandbox/execd:local"
@@ -91,6 +107,7 @@ jobs:
         if: always()
         run: |
           docker ps -aq --filter "label=opensandbox" | xargs -r docker rm -f || true
+          docker rm -f opensandbox-e2e-redis || true
           docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
           pkill -f "python -m opensandbox_server.main" || true
 
@@ -125,15 +142,32 @@ jobs:
       - name: Clean up previous E2E resources
         run: |
           docker ps -aq --filter "label=opensandbox" | xargs -r docker rm -f || true
+          docker rm -f opensandbox-e2e-redis || true
           docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
           docker image prune -f || true
 
       - name: Build local egress image
         run: docker build -t opensandbox/egress:local -f components/egress/Dockerfile .
 
+      - name: Start Redis for Java pool E2E
+        run: |
+          docker rm -f opensandbox-e2e-redis || true
+          docker run -d --name opensandbox-e2e-redis -p 127.0.0.1::6379 redis:7-alpine
+          REDIS_PORT="$(docker inspect -f '{{(index (index .NetworkSettings.Ports "6379/tcp") 0).HostPort}}' opensandbox-e2e-redis)"
+          echo "OPENSANDBOX_TEST_REDIS_URL=redis://127.0.0.1:${REDIS_PORT}/0" >> "$GITHUB_ENV"
+          for i in {1..30}; do
+            if docker exec opensandbox-e2e-redis redis-cli ping | grep -q PONG; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs opensandbox-e2e-redis
+          exit 1
+
       - name: Run tests
         env:
           GRADLE_USER_HOME: ${{ github.workspace }}/.gradle-user-home
+          OPENSANDBOX_TEST_SECURE_ACCESS_VERIFIABLE: "false"
         run: |
           set -e
           export GRADLE_OPTS="-Dorg.gradle.java.installations.auto-detect=true -Dorg.gradle.java.installations.auto-download=false -Dorg.gradle.java.installations.paths=${JAVA_HOME_8_X64},${JAVA_HOME_17_X64}"
@@ -143,8 +177,9 @@ jobs:
           [server]
           host = "127.0.0.1"
           port = 8080
-          log_level = "INFO"
           api_key = ""
+          [log]
+          level = "INFO"
           [runtime]
           type = "docker"
           execd_image = "opensandbox/execd:local"
@@ -183,6 +218,7 @@ jobs:
         if: always()
         run: |
           docker ps -aq --filter "label=opensandbox" | xargs -r docker rm -f || true
+          docker rm -f opensandbox-e2e-redis || true
           docker run --rm -v /tmp:/host_tmp alpine rm -rf /host_tmp/opensandbox-e2e || true
           pkill -f "python -m opensandbox_server.main" || true
 
@@ -237,8 +273,9 @@ jobs:
           [server]
           host = "127.0.0.1"
           port = 8080
-          log_level = "INFO"
           api_key = ""
+          [log]
+          level = "INFO"
           [runtime]
           type = "docker"
           execd_image = "opensandbox/execd:local"
@@ -319,8 +356,9 @@ jobs:
           [server]
           host = "127.0.0.1"
           port = 8080
-          log_level = "INFO"
           api_key = ""
+          [log]
+          level = "INFO"
           [runtime]
           type = "docker"
           execd_image = "opensandbox/execd:local"
@@ -403,8 +441,9 @@ jobs:
           [server]
           host = "127.0.0.1"
           port = 8080
-          log_level = "INFO"
           api_key = ""
+          [log]
+          level = "INFO"
           [runtime]
           type = "docker"
           execd_image = "opensandbox/execd:local"

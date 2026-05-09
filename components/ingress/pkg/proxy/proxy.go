@@ -24,6 +24,7 @@ import (
 
 	"github.com/alibaba/opensandbox/ingress/pkg/renewintent"
 	"github.com/alibaba/opensandbox/ingress/pkg/sandbox"
+	"github.com/alibaba/opensandbox/ingress/pkg/signature"
 	slogger "github.com/alibaba/opensandbox/internal/logger"
 )
 
@@ -31,33 +32,42 @@ type Proxy struct {
 	sandboxProvider      sandbox.Provider
 	mode                 Mode
 	renewIntentPublisher renewintent.Publisher
+
+	secure *signature.Verifier
 }
 
-func NewProxy(_ context.Context, sandboxProvider sandbox.Provider, mode Mode, renewIntentPublisher renewintent.Publisher) *Proxy {
+func NewProxy(_ context.Context, sandboxProvider sandbox.Provider, mode Mode, renewIntentPublisher renewintent.Publisher, secure *signature.Verifier) *Proxy {
 	return &Proxy{
 		sandboxProvider:      sandboxProvider,
 		mode:                 mode,
 		renewIntentPublisher: renewIntentPublisher,
+		secure:               secure,
 	}
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
-		if err := recover(); err != nil {
-			Logger.With(slogger.Field{Key: "error", Value: err}).Errorf("Proxy: proxy causes panic")
-			var errMsg string
-			if e, ok := err.(error); ok {
-				errMsg = e.Error()
-			} else {
-				errMsg = fmt.Sprintf("%v", err)
+		if rcv := recover(); rcv != nil {
+			panicErr := fmt.Sprintf("%v", rcv)
+			if err, ok := rcv.(error); ok {
+				panicErr = err.Error()
 			}
-			http.Error(w, errMsg, http.StatusBadGateway)
+			Logger.With(
+				slogger.Field{Key: "error", Value: panicErr},
+				slogger.Field{Key: "uri", Value: r.RequestURI},
+				slogger.Field{Key: "host", Value: r.Host},
+				slogger.Field{Key: "method", Value: r.Method},
+			).Errorf("ingress: proxy causes panic")
+			http.Error(w, panicErr, http.StatusBadGateway)
 		}
 	}()
 
-	host, err := p.getSandboxHostDefinition(r)
+	host, status, err := p.getSandboxHostDefinition(r)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("OpenSandbox Ingress: %v", err), http.StatusBadRequest)
+		if status == 0 {
+			status = http.StatusBadRequest
+		}
+		http.Error(w, fmt.Sprintf("OpenSandbox Ingress: %v", err), status)
 		return
 	}
 
@@ -79,6 +89,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Host = targetHost
 	r.URL.Host = targetHost
 	r.Header.Del(SandboxIngress)
+	r.Header.Del(signature.OpenSandboxSecureAccessCanonical)
 
 	Logger.With(
 		slogger.Field{Key: "target", Value: targetHost},
@@ -130,22 +141,26 @@ func (p *Proxy) isWebSocketRequest(r *http.Request) bool {
 }
 
 func (p *Proxy) resolveRealHost(host *sandboxHost) (string, error, int) {
-	// Get endpoint IP from sandbox provider
-	endpointIP, err := p.sandboxProvider.GetEndpoint(host.ingressKey)
-	if err != nil {
-		// Map sandbox errors to HTTP status codes
-		switch {
-		case errors.Is(err, sandbox.ErrSandboxNotFound):
-			return "", err, http.StatusNotFound
-		case errors.Is(err, sandbox.ErrSandboxNotReady):
-			return "", err, http.StatusServiceUnavailable
-		default:
-			return "", err, http.StatusBadGateway
+	endpoint := host.endpoint
+	if endpoint == "" {
+		// Fallback lookup (should rarely happen because host parsing now fills endpoint).
+		info, err := p.sandboxProvider.GetEndpoint(host.ingressKey)
+		if err != nil {
+			// Map sandbox errors to HTTP status codes
+			switch {
+			case errors.Is(err, sandbox.ErrSandboxNotFound):
+				return "", err, http.StatusNotFound
+			case errors.Is(err, sandbox.ErrSandboxNotReady):
+				return "", err, http.StatusServiceUnavailable
+			default:
+				return "", err, http.StatusBadGateway
+			}
 		}
+		endpoint = info.Endpoint
 	}
 
 	// Construct target host with port
-	targetHost := fmt.Sprintf("%s:%d", endpointIP, host.port)
+	targetHost := fmt.Sprintf("%s:%d", endpoint, host.port)
 	return targetHost, nil, 0
 }
 
